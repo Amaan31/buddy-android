@@ -11,9 +11,9 @@
 
 This document defines the application-level security and behavior tests required before backend implementation is considered ready.
 
-The SQLite acceptance suite verifies database constraints. It does not prove that application services construct safe queries, enforce the selected character boundary, retrieve only eligible memories, resolve model policies correctly, enforce no-cost routing, or perform multi-step lifecycle operations safely.
+The SQLite acceptance suite verifies database constraints. It does not prove that application services construct safe queries, enforce the selected character boundary, retrieve only eligible memories, resolve model policies correctly, enforce cost-aware routing, or perform multi-step lifecycle operations safely.
 
-Tests must use an isolated temporary SQLite database and must not require a production database, paid AI provider, live API key, paid hosting, or subscription.
+Tests must use an isolated temporary SQLite database and must not require a production database, live paid AI provider, real API key, paid hosting, or Buddy subscription. Paid-provider behavior must be tested with mocked adapters and synthetic credentials.
 
 ## 2. Scope
 
@@ -23,11 +23,11 @@ Tests must use an isolated temporary SQLite database and must not require a prod
 2. Conversation and message access.
 3. Memory Retrieval Engine.
 4. Explicit memory-sharing enforcement.
-5. Model Policy Resolver and no-cost routing.
+5. Model Policy Resolver and cost-aware routing.
 6. Memory approval, correction, supersession, expiry, and deletion workflows.
 7. Transaction handling and error behavior.
-8. Provider credential boundary.
-9. Enforcement of the 100%-free project constraint.
+8. Provider credential boundary and BYOK consent.
+9. Buddy-free product guarantees and paid-AI opt-in safeguards.
 
 ### Out of scope for this milestone
 
@@ -52,7 +52,8 @@ Tests must use an isolated temporary SQLite database and must not require a prod
 - Every test must run against a fresh temporary database initialized from the current schema.
 - Test fixtures must not use paid services, real credentials, or real private conversations.
 - Unknown provider cost status must fail closed.
-- No test may make a billable network request.
+- Paid AI use must require explicit user authorization and BYOK credentials.
+- No test may make a live billable network request.
 
 ## 4. Application service boundaries
 
@@ -64,9 +65,9 @@ These are logical boundaries for testing, not a mandate to implement a particula
 | Conversation Service | Read and write conversations and messages within selected character |
 | Memory Engine | Create candidates, approve, retrieve, correct, supersede, expire, and delete memories |
 | Memory Sharing Service | Grant, revoke, and revalidate individual memory shares |
-| Model Router / Policy Resolver | Resolve character/global policy, ordered fallback, capability, availability, and no-cost eligibility |
-| Provider Manager | Check provider/model availability and cost eligibility without exposing credentials |
-| Credential Store Adapter | Resolve secret references using host-provided secure storage; disabled if unavailable |
+| Model Router / Policy Resolver | Resolve character/global policy, ordered fallback, capability, availability, and cost classification and paid-use consent |
+| Provider Manager | Check provider/model availability, cost classification, and paid-use authorization without exposing credentials |
+| Credential Store Adapter | Resolve BYOK secret references using host-provided secure storage; remote provider integration disabled if unavailable |
 
 Each service receives an explicit, validated operation context. The client must not gain direct SQL or unrestricted database access.
 
@@ -197,19 +198,17 @@ Exact ranking weights, category taxonomy, maximum memory count, and token budget
 | MS-13 | Shared memory expires | Target loses retrieval eligibility |
 | MS-14 | Forget/delete M | All active shares cease granting access |
 
-## 9. Model Policy Resolver and no-cost routing
+## 9. Model Policy Resolver and cost-aware routing
 
 ### 9.1 Approved policy precedence
 
-1. Use an enabled character-specific policy for the selected character and task type, if present.
-2. If the character-specific policy is absent or disabled, try the enabled global policy for that task type.
-3. Validate provider, model, connection, task capability, and no-cost eligibility.
-4. If preferred candidate is unavailable or ineligible, evaluate configured fallbacks in stored array order.
-5. Cross-provider fallback is allowed only when explicitly configured and all no-cost and capability checks pass.
-6. If no eligible candidate remains, return `NoAvailableFreeModel` or an equivalent typed error.
-7. Never silently route to a paid, billable, unknown-cost, or unverified candidate.
-
-A disabled character-specific policy is ignored; it does not block the task. An explicit task prohibition would require a separate future policy state.
+1. Resolve the enabled character-specific policy.
+2. If it is absent or disabled, fall back to the enabled global policy.
+3. Validate provider, model, connection, task capability, cost classification, and user consent.
+4. If the preferred candidate is unavailable or ineligible, evaluate configured fallbacks in stored array order.
+5. Cross-provider fallback is allowed only when explicitly configured and all capability, credential, cost, and consent checks pass.
+6. If no authorized candidate remains, return `NoAvailableModel` or an equivalent typed error.
+7. Never silently route to a paid or unknown-cost candidate.
 
 ### 9.2 Approved fallback JSON structure
 
@@ -217,52 +216,57 @@ A disabled character-specific policy is ignored; it does not block the task. An 
 
 ```json
 [
-  {
-    "provider_id": "provider_a",
-    "model_id": "model_a"
-  },
-  {
-    "provider_id": "provider_b",
-    "model_id": "model_b"
-  }
+  {"provider_id": "provider_a", "model_id": "model_a"},
+  {"provider_id": "provider_b", "model_id": "model_b"}
 ]
 ```
 
 Both IDs are required non-empty strings. The model must belong to the provider. Array order defines priority. Unknown object fields and duplicate pairs are rejected or normalized by validation. JSON validity alone is insufficient.
 
-### 9.3 No-cost eligibility
+### 9.3 Cost classification and consent
 
-A provider/model candidate is eligible only when its cost status has been explicitly verified for no-cost use. Free trials, promotional credits, a free consumer subscription, or an account that requires payment details do not qualify as proof of permanent no-cost access.
+A provider/model candidate must be classified as one of:
 
-Unknown or unverified cost status is treated as ineligible. Remote free-tier providers are optional and may change their terms or quotas. Local inference is preferred, subject to runtime/model compatibility tests.
+- `local`: inference runs on a user's own device or self-hosted hardware.
+- `verified_free`: provider access has been verified as no-cost under its current terms.
+- `user_paid_byok`: paid provider access using the user's own provider account/API key.
+- `unknown`: cost or billing behavior is not verified and must be treated as ineligible.
+
+Paid AI is permitted only when all of the following are true:
+
+- The user has supplied a supported provider credential through BYOK.
+- The credential is stored outside SQLite and ordinary configuration.
+- The user has explicitly enabled paid use for that provider/model.
+- The user has been told that the provider may charge their account.
+- Any paid fallback route has been explicitly authorized; failure of a free/local model alone is not consent.
+
+Provider charges are billed directly by the provider to the user's account. Buddy does not sell credits, resell inference, or pay provider bills. Buddy itself remains free and must not require a paid tier or subscription.
 
 ### 9.4 Test cases
 
 | ID | Scenario | Expected result |
 |---|---|---|
-| MP-01 | A has enabled policy; global exists | A policy wins |
-| MP-02 | A has no policy; global exists | Global policy used |
-| MP-03 | A and B have different policies | Resolve independently |
-| MP-04 | A policy is disabled; global enabled | Global policy used |
-| MP-05 | Preferred model belongs to another provider | Rejected |
-| MP-06 | Preferred provider disabled | Candidate skipped |
-| MP-07 | Preferred model disabled | Candidate skipped |
-| MP-08 | Provider disconnected, expired, or in error | Candidate not usable |
-| MP-09 | Preferred unavailable; first fallback eligible | First fallback selected |
-| MP-10 | First fallback unavailable; next eligible | Next valid fallback selected |
-| MP-11 | No preferred or fallback candidate eligible | `NoAvailableFreeModel`; no arbitrary model |
-| MP-12 | Task type differs | Policy for another task not applied |
-| MP-13 | Fallback uses another provider and is explicitly eligible | Allowed |
-| MP-14 | Fallback provider/model has unknown cost | Skipped |
-| MP-15 | Provider requires payment details or paid subscription | Ineligible |
-| MP-16 | Provider offers free trial/promotional credit only | Ineligible |
-| MP-17 | Candidate may incur paid overage or automatic billing | Ineligible |
-| MP-18 | Router attempts to select a paid model as final fallback | Blocked; no network request |
-| MP-19 | No local model and no verified free remote provider available | Clear no-free-model result |
-| MP-20 | Fallback JSON has missing IDs, wrong types, unknown fields, or duplicates | Configuration rejected |
-| MP-21 | Model lacks capability for requested task | Candidate skipped |
+| MP-01 | Enabled character-specific policy exists | Character policy selected |
+| MP-02 | Character policy disabled; enabled global policy exists | Global policy selected |
+| MP-03 | Character and global policies unavailable | `NoAvailableModel`; no arbitrary model |
+| MP-04 | Preferred model belongs to another provider | Rejected |
+| MP-05 | Preferred provider disabled | Candidate skipped |
+| MP-06 | Provider disconnected, expired, or in error | Candidate not usable |
+| MP-07 | Preferred unavailable; first fallback eligible | First fallback selected |
+| MP-08 | First fallback unavailable; next eligible | Next valid fallback selected |
+| MP-09 | No preferred or fallback candidate eligible | `NoAvailableModel`; no arbitrary model |
+| MP-10 | Explicit cross-provider fallback is configured and eligible | Allowed |
+| MP-11 | Candidate has unknown cost | Skipped |
+| MP-12 | User supplies valid BYOK key but has not enabled paid use | Paid request blocked |
+| MP-13 | User enables paid use for selected provider/model | Paid request may proceed after disclosure/confirmation |
+| MP-14 | Free/local route fails and paid fallback was not authorized | No paid request; `NoAvailableModel` |
+| MP-15 | Paid fallback is explicitly authorized and valid BYOK is present | Paid fallback may proceed |
+| MP-16 | User revokes paid-use consent | Subsequent paid requests blocked |
+| MP-17 | Provider billing is routed through Buddy-owned account | Prohibited architecture; test fails |
+| MP-18 | Buddy UI attempts to charge for app access or core features | Prohibited; test fails |
+| MP-19 | Fallback JSON has missing IDs, wrong types, unknown fields, or duplicates | Configuration rejected |
 
-The router tests must use mocked provider adapters and fake cost metadata. They must not make real billable calls.
+The router tests must use mocked provider adapters, synthetic credentials, and fake cost metadata. They must not make real billable calls.
 
 ## 10. Memory Lifecycle and deletion workflows
 
@@ -327,33 +331,45 @@ The exact working-memory TTL, source-note retention, and backup retention period
 | PC-05 | Host secure store unavailable | Remote credential integration disabled |
 | PC-06 | Credential reference cannot be resolved | Safe error; no fallback to plaintext storage |
 | PC-07 | Local inference needs no credential | Works without provider secret |
+| PC-08 | BYOK key is saved but paid-use consent is off | Paid request blocked |
+| PC-09 | User revokes paid-use consent | Subsequent paid requests blocked |
+| PC-10 | Provider error includes API key | Secret redacted from logs and client errors |
 
-## 12. 100%-free dependency and deployment gate
+## 12. Buddy-free product and optional paid-AI safeguards
 
-### 12.1 Required rule
+### 12.1 Required product rule
 
-The core platform must not require paid software, subscription, API usage, hosting, database, storage, authentication, tunnel, monitoring, or automation.
+Buddy itself must be free to obtain and use. No purchase, subscription, activation fee, paid tier, or payment is required for core platform functionality.
 
-The project may use existing owned hardware, existing internet access, and built-in OS capabilities. Those do not make third-party services free if they later introduce charges.
+AI inference is a separate optional service. Users may choose local inference, verified-free remote providers, or paid AI providers using their own accounts and API keys (BYOK). Any paid provider charges are billed directly by that provider to the user. Buddy must not sell AI credits, resell usage, or bill the user for AI consumption.
 
 ### 12.2 Test cases
 
 | ID | Scenario | Expected result |
 |---|---|---|
-| FR-01 | Inspect required runtime dependencies | No paid license or subscription required |
-| FR-02 | Inspect hosting/deployment plan | Runs on existing hardware; no paid hosting required |
-| FR-03 | Router receives unknown cost metadata | Candidate blocked |
-| FR-04 | Free-tier provider quota/terms are no longer verified | Remote candidate disabled until re-verified |
-| FR-05 | Provider requires card, prepaid credit, or paid subscription | Provider not eligible for baseline |
-| FR-06 | Candidate may incur automatic billing or overage | Candidate blocked |
-| FR-07 | No verified free model is available | Clear no-free-model state; no paid fallback |
-| FR-08 | Dependency update changes license or pricing | Re-evaluation required before adoption |
-| FR-09 | Core platform starts without remote provider credentials | Core functions remain available; AI generation may report no available free model |
-| FR-10 | Test suite is executed | No live paid network request or secret required |
+| FR-01 | Inspect required Buddy runtime dependencies | No paid license or subscription required |
+| FR-02 | Inspect hosting/deployment plan | Core platform runs on existing hardware; no paid hosting required |
+| FR-03 | Core application starts without any AI provider connected | Core platform remains usable |
+| FR-04 | User selects local inference | No remote provider credential required |
+| FR-05 | User selects verified-free remote provider | Allowed while current no-cost terms remain verified |
+| FR-06 | User connects paid provider with own API key | Allowed only through BYOK and explicit paid-use consent |
+| FR-07 | User saves paid-provider key but does not consent to paid usage | No paid request is sent |
+| FR-08 | Free/local provider fails; paid fallback not authorized | No paid request; show `NoAvailableModel` |
+| FR-09 | Free/local provider fails; paid fallback explicitly authorized | Paid fallback may run using user's own provider account |
+| FR-10 | Provider pricing/terms are unknown or verification expired | Candidate blocked until current cost/billing terms are verified |
+| FR-11 | Provider requires payment details or paid subscription | This does not make Buddy paid; disclose provider requirement and let user decide whether to connect |
+| FR-12 | Paid provider usage occurs | Provider bills the user's own account directly; Buddy does not bill or proxy charges |
+| FR-13 | Buddy asks for payment to unlock core app functionality | Prohibited; test fails |
+| FR-14 | Buddy-owned API key or billing account is used to charge users | Prohibited; test fails |
+| FR-15 | Test suite is executed | No live billable network request or real secret required |
 
-### 12.3 Meaning of 100% free
+### 12.3 Meaning of “Buddy is free”
 
-The project constraint means no required new paid software, subscription, API, or hosting expense. Existing electricity, internet bandwidth, storage, and hardware use may still have real-world costs.
+- Buddy itself has no required purchase, subscription, activation fee, or paid core tier.
+- Optional paid AI usage is separate and is paid by the user directly to the AI provider through the user's own account/API key.
+- Local inference and verified-free providers should be supported where technically feasible.
+- Existing electricity, internet bandwidth, storage, and hardware use may still have real-world costs.
+- Never describe a paid provider's AI usage as free, and never imply that a consumer AI subscription automatically grants API access.
 
 ## 13. Test execution strategy
 
@@ -383,7 +399,7 @@ tests/
     test_model_policy_resolver.py
     test_memory_lifecycle.py
     test_provider_credential_boundary.py
-    test_no_cost_policy.py
+    test_cost_and_consent_policy.py
   integration/
     test_application_services.py
   api/
@@ -407,7 +423,7 @@ Use at least:
 - Two providers and multiple models with enabled/disabled states.
 - Global and per-character policies.
 - Mock provider connection states: connected, disconnected, expired, and error.
-- Mock cost states: verified no-cost, paid, unknown, expired verification, and billable-overage risk.
+- Mock cost states: local, verified-free, user-paid-BYOK, and unknown; include expired pricing verification and billing-risk cases.
 - Mock credential store: available, unavailable, and lookup failure.
 
 Do not use real private conversations, real provider credentials, or live billable services in fixtures.
@@ -420,11 +436,11 @@ The application-layer design is ready to move toward implementation only when:
 - Character-owned reads and writes are scoped through validated character context.
 - Retrieval is tested against private, shared, revoked, sensitive, pending, superseded, deleted, and expired records.
 - Model policy precedence and fallback format are specified.
-- The no-cost router rejects unknown, paid, and billable candidates.
+- The router rejects unknown candidates and requires BYOK plus explicit consent for paid candidates.
 - Lifecycle operations are transactional and have rollback tests.
 - Provider secrets are never exposed to client or logs.
 - Secure credential storage is either tested or remote credential integrations remain disabled.
-- Required dependencies and hosting pass the 100%-free audit.
+- Required Buddy dependencies and hosting are free; optional paid AI is BYOK and explicitly authorized.
 - All application and integration tests pass on the target runtime.
 
 Passing tests demonstrates tested behavior; it is not a substitute for broader security review before exposing the service to a network.
@@ -443,14 +459,14 @@ The seven baseline decisions are approved and are no longer open. These implemen
 8. Backup encryption, restore process, and retention period.
 9. Provider-specific free quotas and terms at the time of integration.
 
-Every choice must pass the 100%-free constraint before adoption.
+Every choice must pass the Buddy-free product requirement and optional paid-AI safeguards before adoption.
 
 ## 16. Current status
 
 **Completed:**
 - SQLite schema acceptance suite is present at `database/tests/test_acceptance.py`.
 - Seven application architecture recommendations are approved.
-- 100%-free project constraint is approved.
+- Buddy-free product requirement and optional paid-AI safeguards are approved.
 - Application-layer test specification has been updated to reflect these decisions.
 
 **Not yet completed:**
@@ -462,4 +478,4 @@ Every choice must pass the 100%-free constraint before adoption.
 - Provider integration.
 - Production security review.
 
-**Next action:** evaluate backend runtime and local inference options against existing hardware and the 100%-free constraint. Do not start backend implementation until the target runtime is selected and its compatibility/cost audit is complete.
+**Next action:** evaluate backend runtime, local inference, and optional BYOK provider integration against existing hardware and the Buddy-free product requirement. Do not start backend implementation until the target runtime is selected and its compatibility/cost audit is complete.
