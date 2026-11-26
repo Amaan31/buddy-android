@@ -340,3 +340,231 @@ Stage: Database and Memory Architecture Design.
 Next milestone: Review this conceptual model, then create the first SQLite schema and migration.
 
 No production database has been created yet.
+
+## 14. Architecture Decisions
+
+The following decisions are approved for the initial version of the platform.
+
+14.1 Memory Approval: Hybrid
+
+The platform uses a hybrid memory approval system.
+
+- The AI may automatically identify potential memory items from conversations.
+- Only explicit, non-sensitive, and high-confidence information may be automatically approved.
+- Ambiguous, inferred, sensitive, or uncertain information must remain pending until reviewed by the user.
+- The user can inspect, correct, approve, reject, or delete memory items.
+- Automatic approval must follow the restrictions defined in Section 15.
+
+14.2 Memory Sharing: Selective
+
+Each character has its own isolated memory space.
+
+- Characters cannot access another character's memories by default.
+- The user may explicitly share individual confirmed memory items with selected characters.
+- Sharing one memory does not grant access to the original conversation or other memories.
+- The user can revoke memory-sharing permissions at any time.
+- Sensitive memories cannot be shared in the initial version.
+
+14.3 Platform Ownership: Single-User
+
+The initial version is designed for one user.
+
+- No multi-user account system is required for the initial implementation.
+- Character data belongs to the platform owner.
+- The database must retain character-level data isolation.
+- The architecture should remain extendable to support multiple users in a future version without requiring a complete redesign.
+
+---
+
+## 15. Hybrid Memory Approval Policy
+
+15.1 Memory Candidate Identification
+
+The AI may identify potential memories from conversation messages and create memory candidates.
+
+Each candidate should contain:
+
+- The memory content.
+- The owning character ID.
+- Its source message or conversation reference, when available.
+- Its source type.
+- Its confidence score.
+- Its sensitivity classification.
+- Its approval status.
+- Its creation timestamp.
+
+Identifying a candidate does not automatically mean that the information is approved for long-term storage.
+
+15.2 Automatic Approval Conditions
+
+A memory candidate may be automatically approved only when all of the following conditions are met:
+
+1. The information was explicitly stated by the user.
+2. The information is classified as non-sensitive.
+3. The confidence score is at least 0.90.
+4. The information is not ambiguous or dependent on unsupported assumptions.
+
+Automatic approval must not be used for inferred personal information, sensitive information, or uncertain interpretations.
+
+15.3 User Review Required
+
+The following candidates must remain pending until the user reviews them:
+
+- Inferred information.
+- Ambiguous statements.
+- Sensitive personal information.
+- Information with insufficient confidence.
+- Information that could materially affect a character's understanding of the user but is not explicitly confirmed.
+
+The user must be able to:
+
+- Approve a candidate.
+- Edit a candidate before approval.
+- Reject a candidate.
+- Delete an existing memory.
+- Correct an inaccurate memory.
+
+15.4 Memory Status Lifecycle
+
+Memory items use the following lifecycle statuses:
+
+Status| Description
+candidate| Identified but not yet confirmed
+confirmed| Approved for long-term use
+superseded| Replaced by a newer or corrected memory
+rejected| Explicitly rejected by the user
+deleted| Marked as deleted and excluded from retrieval
+
+Approval status and memory lifecycle status are separate concepts.
+
+Approval status records how a memory was approved:
+
+- "pending"
+- "auto_approved"
+- "user_approved"
+- "rejected"
+
+A memory must not be retrieved as an active long-term memory unless its lifecycle status is "confirmed".
+
+---
+
+## 16. Selective Memory Sharing
+
+16.1 Default Isolation
+
+Every memory item belongs to exactly one character through its "character_id".
+
+A character may retrieve:
+
+1. Its own confirmed memories.
+2. Individual memories explicitly shared with it by another character.
+
+A character must never gain access to another character's conversation history simply because a memory was shared.
+
+16.2 Sharing Requirements
+
+A memory may be shared only when:
+
+- Its lifecycle status is "confirmed".
+- Its sensitivity classification is "normal".
+- Its approval status is "auto_approved" or "user_approved".
+- The source and target characters are different.
+- The user explicitly authorizes the sharing action.
+
+Sensitive memories must not be shared in the initial version.
+
+16.3 Sharing Records
+
+The "memory_shares" table records individual sharing permissions.
+
+Each record must identify:
+
+- The original memory.
+- The source character.
+- The target character.
+- The sharing status.
+- The creation timestamp.
+- The revocation timestamp, when applicable.
+
+A sharing permission can have the following statuses:
+
+- "active"
+- "revoked"
+
+A revoked permission must no longer provide access to the memory.
+
+16.4 Sharing Revocation
+
+The user may revoke a sharing permission at any time.
+
+After revocation:
+
+- The target character must no longer retrieve the shared memory.
+- The original memory remains owned by its source character.
+- The original conversation remains inaccessible to the target character.
+- Other sharing permissions are not affected.
+
+Revoking access must not delete the original memory.
+
+16.5 Memory Retrieval Rules
+
+Memory retrieval must enforce character ownership and sharing permissions at the database or service layer.
+
+The retrieval process must not rely solely on AI instructions to enforce isolation.
+
+---
+
+## 17. Single-User Architecture
+
+17.1 Initial Scope
+
+The initial platform supports one owner.
+
+The first version does not require:
+
+- User registration.
+- Multi-user account management.
+- User roles and permissions.
+- A separate user table.
+
+Character identity and ownership remain separate concepts. Characters represent AI personas, not platform users.
+
+17.2 Data Ownership
+
+All platform data belongs to the single platform owner.
+
+Character-specific data must remain associated with its owning character.
+
+Shared infrastructure data, such as AI provider configurations and global platform settings, may be managed centrally.
+
+17.3 Future Compatibility
+
+Although multi-user support is not part of the initial implementation, the database design should avoid assumptions that would make future migration unnecessarily difficult.
+
+Future multi-user support may introduce:
+
+- A "users" table.
+- An owner or user reference for characters.
+- User-level access control.
+- User-scoped provider connections and settings.
+
+These components must not be implemented until multi-user support becomes an explicit project requirement.
+
+---
+
+## 18. Implementation Constraints
+
+The initial database implementation must follow these constraints:
+
+1. SQLite is the initial database engine.
+2. Every character-owned record must preserve character-level ownership.
+3. Memory retrieval must enforce ownership and sharing permissions.
+4. Raw API keys and provider credentials must never be stored directly in ordinary database fields.
+5. Provider credentials must be referenced through a secure credential-storage mechanism.
+6. Memory sources should preserve provenance whenever possible.
+7. Deletion and correction operations must maintain memory consistency.
+8. Database migrations must be versioned.
+9. The application must support database backup and restoration.
+10. Memory sharing and automatic approval must be enforced by application logic and database constraints where practical.
+
+The initial implementation must be tested with at least two characters to verify that memory isolation and selective sharing work as intended.
