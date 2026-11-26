@@ -10,43 +10,51 @@
 
 ## 1. Purpose
 
-This document records the seven approved application architecture decisions and the additional hard constraint that the project must remain 100% free of required paid software, subscriptions, API usage, and hosting services.
+This document records the seven approved application architecture decisions and the approved product-cost rule: Buddy itself is free, while optional AI inference may be free or paid through user-owned provider accounts (BYOK) with explicit consent.
 
 These decisions are the baseline for future design and application-layer tests. They do not mean that a backend runtime, provider, credential store, or deployment method has already been selected.
 
-## 2. Non-negotiable cost constraint: 100% free
+## 2. Product and cost model: Buddy is free; AI usage may be paid
 
-The platform must be designed so that its required operation does not depend on paid products or services.
+Buddy itself must remain free to obtain and use. The application/platform must not require a purchase, subscription, activation fee, premium tier, or payment to unlock its core product functionality.
 
-### 2.1 Allowed baseline
+AI inference is a separate, user-selected service and may be free or paid:
 
-- Free and open-source software.
-- Built-in capabilities of devices and operating systems already owned by the user.
-- Local/self-hosted services running on existing hardware, subject to compatibility and performance testing.
-- Local inference using a model and runtime that can legally and technically be used at no charge.
-- Free developer tools and free repository features.
-- Optional remote provider integrations only when they can be used without payment, paid subscription, credit card, prepaid credit, or billable overage, and only after their current terms are verified.
+- Local models and no-cost remote providers may be used where compatible and available.
+- A user may connect a paid AI provider using their own account and API key (BYOK — Bring Your Own Key).
+- Any provider charges are billed by that provider directly to the user's provider account. Buddy does not sell AI credits, resell API usage, collect AI usage payments, or pay provider bills on the user's behalf.
+- Buddy must clearly identify the provider/model and disclose that usage may incur provider charges before enabling or making a paid request.
+- The user must explicitly enable paid use for the relevant provider/model. Merely saving an API key does not authorize paid usage.
+- A free/local route must never silently fall back to a paid route. Paid fallback is allowed only when the user has explicitly enabled and authorized that exact fallback behavior.
+- If no authorized model is available, return a clear `NoAvailableModel` result. Do not make an unauthorized request.
+- Buddy must not require a credit card, prepaid AI credit, or paid subscription to use Buddy itself. A paid AI provider may independently impose its own account/payment requirements.
+- Provider pricing, quotas, billing rules, and model availability can change. Show the provider's current pricing reference where practical and avoid claiming a fixed cost unless verified.
+- Existing electricity, internet bandwidth, device storage, and hardware use may have real-world costs. “Buddy is free” means Buddy itself has no required purchase or subscription; it does not mean all third-party AI usage or physical operation is literally zero-cost.
 
-### 2.2 Prohibited baseline dependencies
+### 2.1 Free Buddy platform baseline
 
-- Paid API calls or paid model usage.
-- Paid AI subscriptions used as an assumed API entitlement.
-- Paid hosting, VPS, cloud database, managed backend, or paid storage.
-- Paid authentication, tunnel, monitoring, analytics, or automation services.
-- Software that requires a paid license for the intended use.
-- Any automatic fallback that can silently route a request to a billable provider or model.
-- Any design that requires the user to enter payment details to keep the core platform running.
+- No paid Buddy edition, subscription, activation, or premium-only core feature.
+- No required paid hosting, managed database, storage, authentication, tunnel, monitoring, analytics, or automation service.
+- Prefer free/open-source software and self-hosted/local components where feasible.
+- Core application functions must remain usable without connecting a paid AI provider.
+
+### 2.2 Optional AI provider costs
+
+- Provider integrations are optional adapters.
+- Support both local/free inference and user-owned paid provider accounts.
+- BYOK secrets must be stored securely and never exposed to the PWA, logs, exports, or ordinary configuration.
+- The provider bills the user directly; Buddy must not proxy charges through a Buddy-owned billing account.
+- Do not infer API access from a consumer chat subscription. Only supported provider API credentials and terms may be used.
 
 ### 2.3 Cost-safety rules
 
-1. Local inference is the preferred long-term route for a no-bill platform, but the runtime and model must be tested on the actual selected hardware before being approved.
-2. Remote free-tier providers are optional adapters, not a core dependency. Free quotas, model availability, and provider terms may change.
-3. Unknown or unverified provider cost status is treated as unavailable.
+1. Every provider/model candidate must carry an explicit cost classification: `local`, `verified_free`, `user_paid_byok`, or `unknown`.
+2. `unknown` is ineligible. A paid candidate is eligible only when its provider connection is valid and the user has explicitly enabled paid usage for it.
+3. Saving credentials is not equivalent to consent to incur charges.
 4. The Model Router must never silently select a paid or unknown-cost model.
-5. A provider must be explicitly marked as eligible for no-cost use before it can be selected.
-6. Usage limits and provider terms must be checked before enabling a remote free-tier adapter. The application must stop or ask for a new explicit decision rather than incur charges.
-7. If no verified no-cost model is available, the application must return a clear `NoAvailableFreeModel` result. It must not spend money to preserve availability.
-8. The project may still consume existing electricity, internet bandwidth, device storage, and hardware resources. “100% free” means no required new paid software, subscription, API, or hosting expense; it does not mean physical operation has literally zero cost.
+5. Cross-provider fallback may cross from free to paid only when the user has explicitly enabled that specific paid fallback route.
+6. If no authorized model is available, return `NoAvailableModel`; never incur charges merely to preserve availability.
+7. The project must not introduce required paid dependencies for Buddy itself.
 
 ## 3. Decision 1 — Active character context
 
@@ -69,7 +77,7 @@ The platform must be designed so that its required operation does not depend on 
 
 - An enabled character-specific policy takes precedence over an enabled global policy for the same task.
 - If a character-specific policy is disabled, the resolver ignores that policy and attempts the enabled global policy.
-- If no applicable enabled global policy exists, resolution continues through the configured no-cost fallback rules.
+- If no applicable enabled global policy exists, resolution continues through the configured fallback rules, with cost classification and user-consent checks applied to every candidate.
 - A disabled policy does not itself mean “block this task.”
 - If the product later needs a task prohibition, that must be represented by a separate explicit policy state; it must not be inferred from `is_enabled = 0`.
 
@@ -112,8 +120,9 @@ A fallback may use a different provider from the preferred model, provided that:
 - The provider and model are enabled.
 - The provider connection is usable.
 - The model supports the requested task.
-- Its cost status is verified as no-cost under the platform's cost policy.
-- Selecting it cannot create a billable request.
+- Its cost classification is known.
+- If it is paid, the user has explicitly enabled paid use for that provider/model and authorized it as a fallback.
+- The route cannot incur a charge without that authorization.
 
 Fallback is not permission to discover or select arbitrary models from a provider catalogue.
 
@@ -176,24 +185,27 @@ Original conversation messages are handled according to the user's requested sco
 - `provider_connections.credential_ref` is only a reference to a separate secure storage mechanism.
 - Prefer built-in secure storage provided by the selected host operating system when it is available without a paid service.
 - If a suitable secure store cannot be used on the selected runtime, remote credential-based provider integrations remain disabled.
-- Local inference that does not require provider credentials remains available as the preferred no-cost route, subject to hardware validation.
+- Local inference that does not require provider credentials remains a preferred route, subject to hardware validation.
+- Optional remote paid providers may be connected through BYOK; provider charges are billed directly to the user's provider account.
 - The exact credential-store implementation is deferred until the backend host/runtime is selected and tested.
 
-## 10. Provider and Model Router no-cost enforcement
+## 10. Provider and Model Router cost and consent enforcement
 
 Every provider/model candidate must pass all of these checks before selection:
 
 1. Provider exists and is enabled.
 2. Model exists, belongs to that provider, and is enabled.
 3. Provider connection is usable when a connection is required.
-4. Model supports the requested task.
-5. Cost status is explicitly verified as eligible for no-cost use.
-6. The selected route cannot incur payment, paid overage, or automatic billing.
-7. The provider's current free-use terms and quota have not been marked unknown or expired for verification.
+4. The model supports the requested task.
+5. Cost classification is explicit: `local`, `verified_free`, `user_paid_byok`, or `unknown`.
+6. `unknown` cost is always ineligible.
+7. `user_paid_byok` is eligible only when a valid user-owned credential is available and the user has explicitly enabled paid usage for that provider/model.
+8. Paid fallback is never selected solely because free/local candidates failed; the user must have authorized that paid fallback route in advance.
+9. Buddy never pays provider charges or routes paid usage through a Buddy-owned billing account.
 
-If any check fails, the candidate is skipped. If no candidate remains, return `NoAvailableFreeModel` or an equivalent typed result.
+If any check fails, the candidate is skipped. If no authorized candidate remains, return `NoAvailableModel` or an equivalent typed result.
 
-No-cost status must not be inferred from a provider name, model name, free trial, promotional credit, or the presence of a free account.
+The UI must distinguish “API key saved” from “paid usage authorized”. Before first paid use, disclose that the provider may charge the user's account and require explicit confirmation. The application must not promise a particular price unless current provider pricing has been verified.
 
 ## 11. Decisions that remain open
 
@@ -209,17 +221,18 @@ The following are not silently decided by this document:
 - Backup encryption, restore process, and backup retention period.
 - Provider-specific free quotas and terms at the time of integration.
 
-Each must be evaluated against the 100%-free constraint before adoption.
+Each must be evaluated for license, compatibility, security, and cost. Buddy itself must remain free; optional paid AI providers may be supported through explicit BYOK consent.
 
 ## 12. Implementation gate
 
-No implementation may introduce a required paid dependency without an explicit change to the approved project constraint.
+No implementation may introduce a required paid dependency or payment gate for Buddy itself. Optional paid AI provider integrations are permitted only through user-owned BYOK credentials and explicit paid-use consent.
 
 Before a backend runtime is approved, document:
 
 - Software license and price.
 - Whether any subscription or account payment is required.
-- Whether API use can incur charges.
+- Whether API use can incur charges and who is billed.
+- Whether paid AI usage is strictly opt-in and BYOK.
 - Whether hosting or remote-access components are paid.
 - Whether the solution can run on existing hardware.
 - Whether the solution works without network access for its local/core functions.
@@ -227,9 +240,9 @@ Before a backend runtime is approved, document:
 
 ## 13. Current status
 
-**Approved:** all seven architecture recommendations and the 100%-free constraint.
+**Approved:** all seven architecture recommendations; Buddy itself must be free; optional paid AI usage is permitted through BYOK and explicit user consent.
 
-**Ready for next design stage:** backend runtime and local inference compatibility evaluation.
+**Ready for next design stage:** backend runtime, local inference compatibility, and optional BYOK provider integration evaluation.
 
 **Not yet approved:** any specific backend framework, inference runtime, model, provider, or credential-store implementation.
 
