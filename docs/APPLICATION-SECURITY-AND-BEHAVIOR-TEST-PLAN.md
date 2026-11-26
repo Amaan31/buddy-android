@@ -2,8 +2,8 @@
 
 **Project:** Multi-Character AI Companion Platform  
 **Branch target:** `PLATFORM-FOUNDATION`  
-**Status:** Proposed application-layer test specification  
-**Depends on:** `docs/PLATFORM-FOUNDATION.md`, `docs/DATABASE-AND-MEMORY.md`, and `database/schema/001_initial.sql`
+**Status:** Updated test specification — approved architecture baseline  
+**Depends on:** `docs/PLATFORM-FOUNDATION.md`, `docs/DATABASE-AND-MEMORY.md`, `docs/APPROVED-ARCHITECTURE-DECISIONS.md`, and `database/schema/001_initial.sql`
 
 ---
 
@@ -11,9 +11,9 @@
 
 This document defines the application-level security and behavior tests required before backend implementation is considered ready.
 
-The SQLite acceptance suite verifies database constraints. It does not prove that application services construct safe queries, enforce the selected character boundary, retrieve only eligible memories, resolve model policies correctly, or perform multi-step lifecycle operations safely.
+The SQLite acceptance suite verifies database constraints. It does not prove that application services construct safe queries, enforce the selected character boundary, retrieve only eligible memories, resolve model policies correctly, enforce no-cost routing, or perform multi-step lifecycle operations safely.
 
-The next test layer must verify those behaviors through application service interfaces. Tests should use an isolated temporary SQLite database and must not require a production database, paid AI provider, or live API key.
+Tests must use an isolated temporary SQLite database and must not require a production database, paid AI provider, live API key, paid hosting, or subscription.
 
 ## 2. Scope
 
@@ -23,10 +23,11 @@ The next test layer must verify those behaviors through application service inte
 2. Conversation and message access.
 3. Memory Retrieval Engine.
 4. Explicit memory-sharing enforcement.
-5. Model Policy Resolver.
-6. Memory approval, correction, supersession, and deletion workflows.
+5. Model Policy Resolver and no-cost routing.
+6. Memory approval, correction, supersession, expiry, and deletion workflows.
 7. Transaction handling and error behavior.
-8. Prevention of provider credential exposure.
+8. Provider credential boundary.
+9. Enforcement of the 100%-free project constraint.
 
 ### Out of scope for this milestone
 
@@ -41,7 +42,7 @@ The next test layer must verify those behaviors through application service inte
 
 - Use at least two characters in every isolation test.
 - Include positive tests and negative/denial tests.
-- Assert returned records, not only successful HTTP or service responses.
+- Assert returned records, not only successful service responses.
 - Use parameterized SQL and test adversarial identifiers and filter values.
 - Run multi-step mutations inside transactions.
 - Do not expose unrestricted database access to the PWA/client.
@@ -49,71 +50,78 @@ The next test layer must verify those behaviors through application service inte
 - A failed or denied operation must not partially mutate data.
 - Keep tests deterministic; mock provider adapters rather than calling live providers.
 - Every test must run against a fresh temporary database initialized from the current schema.
+- Test fixtures must not use paid services, real credentials, or real private conversations.
+- Unknown provider cost status must fail closed.
+- No test may make a billable network request.
 
 ## 4. Application service boundaries
 
-The following are logical service boundaries for testing, not a mandate to implement a particular framework or class naming convention.
+These are logical boundaries for testing, not a mandate to implement a particular framework or class naming convention.
 
 | Service boundary | Responsibility |
 |---|---|
-| Character Manager / Access Guard | Validate the selected character and scope all character-owned reads and writes |
-| Conversation Service | Read and write conversations and messages within the selected character |
-| Memory Engine | Create candidates, approve, retrieve, correct, supersede, and delete memories |
+| Character Manager / Access Guard | Validate selected character and scope character-owned reads and writes |
+| Conversation Service | Read and write conversations and messages within selected character |
+| Memory Engine | Create candidates, approve, retrieve, correct, supersede, expire, and delete memories |
 | Memory Sharing Service | Grant, revoke, and revalidate individual memory shares |
-| Model Router / Policy Resolver | Resolve enabled character-specific and global model policies |
-| Provider Manager | Check provider/model availability without exposing credentials |
+| Model Router / Policy Resolver | Resolve character/global policy, ordered fallback, capability, availability, and no-cost eligibility |
+| Provider Manager | Check provider/model availability and cost eligibility without exposing credentials |
+| Credential Store Adapter | Resolve secret references using host-provided secure storage; disabled if unavailable |
 
-Each service should receive an explicit, validated operation context. The client must not gain direct SQL or unrestricted database access.
+Each service receives an explicit, validated operation context. The client must not gain direct SQL or unrestricted database access.
 
 ## 5. Character Access Guard
 
 ### 5.1 Required behavior
 
-- Validate that the selected character exists and is eligible for use.
-- Scope every character-owned read and write to the selected `character_id`.
+- Validate that the selected character exists and is eligible for the requested operation.
+- Scope every character-owned read and write to the validated `character_id`.
 - Verify that a conversation belongs to the selected character before reading, appending, archiving, or deleting it.
 - Verify that a message belongs to the selected character and requested conversation.
 - Reject mismatched or unknown identifiers without returning another character's data.
-- Do not treat a client-supplied `character_id` as proof of authorization.
-- Shared infrastructure records such as provider definitions and model catalogue are not character-owned records.
+- Treat a client-supplied ID as a selector, not proof of authorization or permission to widen a query.
+- Do not confuse single-user character isolation with multi-user authorization.
+- Keep network exposure beyond the trusted local environment disabled until a free authentication and secure remote-access design is reviewed and tested.
 
 ### 5.2 Test cases
 
 | ID | Scenario | Expected result |
 |---|---|---|
-| CA-01 | Select existing active character A | Character A context is accepted |
+| CA-01 | Select existing active character A | Character A context accepted |
 | CA-02 | Select unknown character ID | Denied; no character data returned |
 | CA-03 | Select archived or deleted character | Denied for normal conversation operations |
-| CA-04 | Read character B conversation while A is selected | Denied; no message content or metadata leaked |
-| CA-05 | Append a message to B conversation while A is selected | Denied; database unchanged |
-| CA-06 | Request a message ID belonging to B under A context | Denied; no content leaked |
-| CA-07 | Attempt to override selected character using request parameter | Request cannot widen the validated operation context |
+| CA-04 | Read B conversation while A is selected | Denied; no message content or metadata leaked |
+| CA-05 | Append message to B conversation while A is selected | Denied; database unchanged |
+| CA-06 | Request B message ID under A context | Denied; no content leaked |
+| CA-07 | Attempt to override validated context within a request | Query remains scoped to validated context |
 | CA-08 | Use malformed, empty, or unexpected identifiers | Safe validation error; no SQL execution or data leak |
-| CA-09 | Switch from A to B, then back to A | Each operation sees only the newly selected character's scope |
+| CA-09 | Switch A → B → A | Each operation sees only the newly selected character's scope |
+| CA-10 | Start a new character context after switching | Previous character's working context is not implicitly reused |
 
 ### 5.3 Security assertions
 
 - Denial responses must not reveal whether a foreign conversation or message ID exists, unless a later product-level error policy explicitly permits that distinction.
 - A denied write must leave all relevant tables unchanged.
-- Character context must be applied to every query path, including detail, list, count, search, export, and deletion operations.
+- Character context must be applied to list, detail, count, search, export, update, and deletion query paths.
 
 ## 6. Conversation and message behavior
 
 | ID | Scenario | Expected result |
 |---|---|---|
-| CV-01 | List conversations for selected character A | Only A conversations returned |
-| CV-02 | Fetch conversation history | Only messages from the validated conversation and character returned |
-| CV-03 | Append a message to A conversation | Message stored with matching conversation and character IDs |
-| CV-04 | Attempt cross-character message append | Denied before mutation; composite foreign key remains a final safeguard |
-| CV-05 | Fetch history after switching character | Previous character's history is not included |
-| CV-06 | Archive a conversation | Only the selected character's conversation is changed |
-| CV-07 | Include failed or partial messages in history | Behavior follows an explicit conversation-history policy; they must not be silently represented as complete |
+| CV-01 | List conversations for A | Only A conversations returned |
+| CV-02 | Fetch conversation history | Only messages for validated conversation and character returned |
+| CV-03 | Append message to A conversation | Message stored with matching conversation and character IDs |
+| CV-04 | Attempt cross-character append | Denied before mutation; composite foreign key remains final safeguard |
+| CV-05 | Fetch history after switching character | Previous character history is not included |
+| CV-06 | Archive conversation | Only selected character's conversation is changed |
+| CV-07 | Include failed or partial messages | Explicit history policy is followed; never silently represent as complete |
+| CV-08 | Build model context for A | No B conversation or private memory is included |
 
-The conversation service must not combine histories from multiple characters merely because they share the same platform database.
+The conversation service must not combine histories from multiple characters merely because they share the platform database.
 
 ## 7. Memory Retrieval Engine
 
-### 7.1 Eligibility rules from the approved database design
+### 7.1 Eligibility rules
 
 A memory is eligible as an active long-term memory only when:
 
@@ -122,39 +130,39 @@ A memory is eligible as an active long-term memory only when:
 
 A character may retrieve:
 
-1. Its own confirmed and approved memories.
-2. Individual normal-sensitivity memories explicitly shared with it by another character.
+1. Its own confirmed and approved memories that have not expired.
+2. Individual normal-sensitivity memories explicitly shared with it by another character, where the share remains active and the memory has not expired.
 
 A target character must not receive access to the source character's original conversation, source messages, unrelated memories, or sensitive memories.
 
-The `v_accessible_memories` view is a source of eligible records. The application must still filter by the requested `accessible_to_character_id`.
+The `v_accessible_memories` view provides eligible rows. The application must filter by the requested `accessible_to_character_id` and must enforce expiry at retrieval time.
 
 ### 7.2 Test cases
 
 | ID | Scenario | Expected result |
 |---|---|---|
-| MR-01 | A retrieves its own confirmed, approved memory | Returned |
-| MR-02 | A has a candidate/pending memory | Excluded |
-| MR-03 | A has a rejected, deleted, or superseded memory | Excluded as current fact |
-| MR-04 | A requests B's private memory | Excluded |
-| MR-05 | A requests a normal-sensitivity memory explicitly shared by B | Returned to A |
-| MR-06 | A requests a sensitive memory owned by B | Excluded |
-| MR-07 | A requests a shared memory after its share is revoked | Excluded |
-| MR-08 | A requests a memory after its owner marks it non-confirmed | Excluded |
-| MR-09 | A requests a memory after its owner changes it to sensitive | Excluded from A |
-| MR-10 | A requests an expired memory | Excluded according to the expiry policy |
-| MR-11 | A requests memories with a different accessible character ID | No cross-character result |
-| MR-12 | Retrieval result includes provenance | Only permitted memory/source metadata is returned; no source conversation access |
+| MR-01 | A retrieves own confirmed, approved memory | Returned |
+| MR-02 | A has candidate/pending memory | Excluded |
+| MR-03 | A has rejected, deleted, or superseded memory | Excluded as current fact |
+| MR-04 | A requests B private memory | Excluded |
+| MR-05 | A requests normal memory explicitly shared by B | Returned to A |
+| MR-06 | A requests sensitive memory owned by B | Excluded |
+| MR-07 | A requests memory after share is revoked | Excluded |
+| MR-08 | A requests memory after owner marks it non-confirmed | Excluded |
+| MR-09 | A requests memory after owner changes it to sensitive | Excluded from A |
+| MR-10 | A requests memory at or after `expires_at` | Excluded |
+| MR-11 | A requests memory with a different accessible character ID | No cross-character result |
+| MR-12 | Retrieval result includes provenance | Only permitted memory/source metadata; no source conversation access |
+| MR-13 | A's own memory expires | Excluded from A's retrieval |
+| MR-14 | A retrieves after switching from B | No B-only memory remains in assembled context |
 
-### 7.3 Retrieval ranking and context limits
+### 7.3 Ranking and context limits
 
-The database design calls for a small relevant subset, using character ID, relevance, category, recency, approval status, sensitivity/sharing eligibility, expiry, and supersession.
-
-Exact ranking weights, category taxonomy, maximum memory count, and token budget are not yet approved. Until those decisions are made:
+Exact ranking weights, category taxonomy, maximum memory count, and token budget remain open. Until approved:
 
 - Test eligibility and isolation independently from ranking.
-- Use deterministic fixtures for any ranking tests.
-- Do not invent ranking weights or memory limits in implementation.
+- Use deterministic fixtures for ranking tests.
+- Do not invent ranking weights or memory limits.
 - Record ranking and context-budget policy as an open design decision.
 
 ## 8. Memory Sharing Service
@@ -162,133 +170,202 @@ Exact ranking weights, category taxonomy, maximum memory count, and token budget
 ### 8.1 Required behavior
 
 - Sharing requires explicit user authorization for one individual memory and one target character.
-- Only confirmed, approved, normal-sensitivity memories may be shared.
+- Only confirmed, approved, normal-sensitivity, unexpired memories may be shared.
 - Source and target characters must differ.
-- Sharing a memory never grants access to source conversations or other memories.
-- Revocation immediately removes the target's retrieval eligibility.
+- Sharing never grants access to source conversations or other memories.
+- Revocation immediately removes target retrieval eligibility.
 - Re-activation must revalidate eligibility.
-- If a shared memory becomes ineligible, its active shares must no longer grant access.
+- If a shared memory becomes ineligible or expires, it must no longer grant access.
+- A memory deletion/forget operation revokes all associated active shares.
 
 ### 8.2 Test cases
 
 | ID | Scenario | Expected result |
 |---|---|---|
-| MS-01 | User authorizes eligible memory M from A to B | One active share is created |
-| MS-02 | Share a candidate or pending memory | Denied |
-| MS-03 | Share a sensitive memory | Denied |
-| MS-04 | Share a memory from A to A | Denied |
+| MS-01 | User authorizes eligible M from A to B | One active share created |
+| MS-02 | Share candidate or pending memory | Denied |
+| MS-03 | Share sensitive memory | Denied |
+| MS-04 | Share memory A to A | Denied |
 | MS-05 | Share without explicit authorization | Denied |
-| MS-06 | B retrieves the shared memory | Only that memory is visible |
-| MS-07 | B attempts to read A's source conversation | Denied |
+| MS-06 | B retrieves shared memory | Only that memory visible |
+| MS-07 | B attempts to read A source conversation | Denied |
 | MS-08 | Revoke A-to-B share | B can no longer retrieve M |
 | MS-09 | Re-activate share while M remains eligible | Allowed only after revalidation |
-| MS-10 | Re-activate share after M becomes sensitive or unapproved | Denied |
-| MS-11 | A shares M with B and C, then revokes B | B loses access; C remains unaffected |
-| MS-12 | Share record is duplicated for the same memory and target | Existing permission is handled safely; no duplicate active grant |
+| MS-10 | Re-activate after M becomes sensitive or unapproved | Denied |
+| MS-11 | Share M with B and C, then revoke B | B loses access; C unaffected |
+| MS-12 | Duplicate share for same memory and target | No duplicate active grant |
+| MS-13 | Shared memory expires | Target loses retrieval eligibility |
+| MS-14 | Forget/delete M | All active shares cease granting access |
 
-## 9. Model Policy Resolver
+## 9. Model Policy Resolver and no-cost routing
 
-### 9.1 Source-backed policy rules
+### 9.1 Approved policy precedence
 
-The database design establishes:
+1. Use an enabled character-specific policy for the selected character and task type, if present.
+2. If the character-specific policy is absent or disabled, try the enabled global policy for that task type.
+3. Validate provider, model, connection, task capability, and no-cost eligibility.
+4. If preferred candidate is unavailable or ineligible, evaluate configured fallbacks in stored array order.
+5. Cross-provider fallback is allowed only when explicitly configured and all no-cost and capability checks pass.
+6. If no eligible candidate remains, return `NoAvailableFreeModel` or an equivalent typed error.
+7. Never silently route to a paid, billable, unknown-cost, or unverified candidate.
 
-- Policies may be global (`character_id IS NULL`) or character-specific.
-- Character-specific policies may override global defaults.
-- The preferred model must belong to the preferred provider.
-- The Model Router selects according to availability, capability, configured preferences, and cost.
-- Provider/model catalogues and connection status are shared infrastructure.
+A disabled character-specific policy is ignored; it does not block the task. An explicit task prohibition would require a separate future policy state.
 
-### 9.2 Proposed resolver precedence to validate
+### 9.2 Approved fallback JSON structure
 
-The following is a proposed deterministic interpretation of the approved override rule. Confirm it before treating it as a final product contract:
+`fallback_models_json` is an ordered array:
 
-1. Look for an enabled policy for the selected character and requested task type.
-2. If none is applicable, look for an enabled global policy for that task type.
-3. Validate that the preferred provider and model exist and are enabled, and that the provider connection is usable.
-4. If the preferred model is unavailable, evaluate configured fallbacks in their stored order, validating each candidate.
-5. If no valid model remains, return a typed `NoAvailableModel`/configuration error. Do not silently select an unrelated model.
+```json
+[
+  {
+    "provider_id": "provider_a",
+    "model_id": "model_a"
+  },
+  {
+    "provider_id": "provider_b",
+    "model_id": "model_b"
+  }
+]
+```
 
-An explicitly disabled character-specific policy is not yet defined as either “fall back to global” or “disable this task for this character.” This behavior must be decided and tested before implementation.
+Both IDs are required non-empty strings. The model must belong to the provider. Array order defines priority. Unknown object fields and duplicate pairs are rejected or normalized by validation. JSON validity alone is insufficient.
 
-### 9.3 Test cases
+### 9.3 No-cost eligibility
+
+A provider/model candidate is eligible only when its cost status has been explicitly verified for no-cost use. Free trials, promotional credits, a free consumer subscription, or an account that requires payment details do not qualify as proof of permanent no-cost access.
+
+Unknown or unverified cost status is treated as ineligible. Remote free-tier providers are optional and may change their terms or quotas. Local inference is preferred, subject to runtime/model compatibility tests.
+
+### 9.4 Test cases
 
 | ID | Scenario | Expected result |
 |---|---|---|
-| MP-01 | Character A has enabled policy; global policy also exists | A's policy wins |
-| MP-02 | Character A has no policy; global policy exists | Global policy is used |
-| MP-03 | Character A and B have different policies | Each resolves independently |
-| MP-04 | Preferred model belongs to a different provider | Rejected by data constraints or resolver validation |
-| MP-05 | Preferred provider is disabled | Candidate is not selected |
-| MP-06 | Preferred model is disabled | Candidate is not selected |
-| MP-07 | Provider connection is disconnected, expired, or in error | Candidate is not treated as usable |
-| MP-08 | Preferred model unavailable; first fallback available | First valid fallback selected |
-| MP-09 | First fallback unavailable; later fallback available | Next valid fallback selected |
-| MP-10 | No preferred or fallback candidate is usable | Typed error; no arbitrary model selected |
-| MP-11 | Task type differs | Policy for another task is not applied |
-| MP-12 | Disabled policy behavior | Pending product decision; test after decision |
+| MP-01 | A has enabled policy; global exists | A policy wins |
+| MP-02 | A has no policy; global exists | Global policy used |
+| MP-03 | A and B have different policies | Resolve independently |
+| MP-04 | A policy is disabled; global enabled | Global policy used |
+| MP-05 | Preferred model belongs to another provider | Rejected |
+| MP-06 | Preferred provider disabled | Candidate skipped |
+| MP-07 | Preferred model disabled | Candidate skipped |
+| MP-08 | Provider disconnected, expired, or in error | Candidate not usable |
+| MP-09 | Preferred unavailable; first fallback eligible | First fallback selected |
+| MP-10 | First fallback unavailable; next eligible | Next valid fallback selected |
+| MP-11 | No preferred or fallback candidate eligible | `NoAvailableFreeModel`; no arbitrary model |
+| MP-12 | Task type differs | Policy for another task not applied |
+| MP-13 | Fallback uses another provider and is explicitly eligible | Allowed |
+| MP-14 | Fallback provider/model has unknown cost | Skipped |
+| MP-15 | Provider requires payment details or paid subscription | Ineligible |
+| MP-16 | Provider offers free trial/promotional credit only | Ineligible |
+| MP-17 | Candidate may incur paid overage or automatic billing | Ineligible |
+| MP-18 | Router attempts to select a paid model as final fallback | Blocked; no network request |
+| MP-19 | No local model and no verified free remote provider available | Clear no-free-model result |
+| MP-20 | Fallback JSON has missing IDs, wrong types, unknown fields, or duplicates | Configuration rejected |
+| MP-21 | Model lacks capability for requested task | Candidate skipped |
 
-Fallback entries are currently stored as JSON. Their exact shape, provider/model identifier format, validation rules, and whether cross-provider fallback is permitted must be specified before MP-08 and MP-09 are implemented.
+The router tests must use mocked provider adapters and fake cost metadata. They must not make real billable calls.
 
 ## 10. Memory Lifecycle and deletion workflows
 
-### 10.1 Required behavior
+### 10.1 Approved behavior
 
 - Candidate detection does not itself approve a memory.
 - Only explicit, normal-sensitivity memories with certainty at least `0.90` may be auto-approved.
 - Inferred, ambiguous, sensitive, or low-confidence candidates require user review.
-- User review must support approve, edit before approval, reject, delete, and correction.
+- User review supports approve, edit before approval, reject, delete, and correction.
 - Corrections supersede outdated memories rather than continuing to present them as current truth.
-- Retrieval excludes superseded, rejected, deleted, and pending memories.
-- Deletion must account for working-memory summaries and source references.
-- Message source references must be detached before deleting a referenced message.
-- Multi-record operations must be transactional.
+- Retrieval excludes superseded, rejected, deleted, pending, and expired memories.
+- Long-term memory does not expire by default.
+- Expiry does not automatically mean physical deletion.
+- Working memory is temporary, but exact default TTL is still undecided.
+- Deletion accounts for working-memory summaries, active shares, and source references.
+- Message source references are detached before deleting a referenced message.
+- Multi-record operations are transactional.
 
 ### 10.2 Test cases
 
 | ID | Scenario | Expected result |
 |---|---|---|
-| ML-01 | Create an inferred candidate | Remains pending |
-| ML-02 | User approves a pending candidate | Becomes confirmed and user-approved |
-| ML-03 | User rejects a candidate | Rejected and excluded from retrieval |
-| ML-04 | User edits a candidate before approval | Edited content is what gets approved |
-| ML-05 | User corrects a confirmed memory | Old memory is superseded; corrected memory becomes eligible only after approval |
-| ML-06 | Delete a memory with active shares | Shares no longer grant access |
-| ML-07 | Delete a source message referenced by memory_sources | Source is detached transactionally before message deletion |
-| ML-08 | Delete operation fails midway | Transaction rolls back; no partial deletion |
-| ML-09 | Delete a conversation | Related working memory is handled; retained memory provenance follows explicit deletion policy |
-| ML-10 | Archive a character | Character is unavailable for normal use; data is not physically erased |
-| ML-11 | Physically erase a character | Only through an explicit, tested erasure workflow |
-| ML-12 | User asks to forget information represented in derived working memory | Relevant derived context is also removed or rebuilt according to the deletion policy |
+| ML-01 | Create inferred candidate | Remains pending |
+| ML-02 | User approves pending candidate | Confirmed and user-approved |
+| ML-03 | User rejects candidate | Rejected and excluded |
+| ML-04 | User edits candidate before approval | Edited content is approved |
+| ML-05 | User corrects confirmed memory | Old memory superseded; corrected memory eligible only after approval |
+| ML-06 | Delete memory with active shares | Shares no longer grant access |
+| ML-07 | Delete source message | Source detached transactionally before deletion |
+| ML-08 | Delete operation fails midway | Transaction rolls back |
+| ML-09 | Delete conversation | Working memory handled; retained provenance follows approved deletion scope |
+| ML-10 | Archive character | Unavailable for normal use; data not physically erased |
+| ML-11 | Physically erase character | Only through explicit tested erasure workflow |
+| ML-12 | Forget information in derived working memory | Derived context invalidated or rebuilt |
+| ML-13 | Long-term memory has no expiry | Remains eligible while other rules pass |
+| ML-14 | Long-term memory expires | Excluded from retrieval; not automatically physically deleted |
+| ML-15 | Working memory reaches configured expiry | Excluded/cleared according to configured TTL |
+| ML-16 | Forget operation fails at a later step | Transaction rollback or safe retry; no partial active access |
+| ML-17 | Forget operation completes | Target memory, shares, and identifiable derived context no longer appear in retrieval |
 
-The precise policy for retaining source notes after a message deletion, and for removing derived information from backups, remains to be defined. Tests must reflect the final approved policy rather than assume one.
+The exact working-memory TTL, source-note retention, and backup retention period remain open. Tests must not invent these values.
 
 ## 11. Provider credential boundary
 
-- Raw API keys and OAuth tokens must never be stored in ordinary database fields.
-- `provider_connections.credential_ref` must point to secure credential storage.
-- The PWA must not receive raw provider credentials.
-- Logs, exception messages, test output, and exported diagnostics must redact secrets.
-- Provider adapters should be mocked in unit and integration tests.
+### 11.1 Approved behavior
+
+- Raw API keys and OAuth tokens are never stored in SQLite, source code, ordinary configuration files, frontend state, logs, or exports.
+- `provider_connections.credential_ref` points to separate secure storage.
+- Prefer built-in host operating-system secure storage where available without payment.
+- If a suitable secure store cannot be used, remote credential-based provider integrations remain disabled.
+- Local inference without provider credentials remains preferred, subject to compatibility testing.
+- The selected secure-store implementation is not yet approved.
+
+### 11.2 Test cases
 
 | ID | Scenario | Expected result |
 |---|---|---|
-| PC-01 | Inspect provider connection records | Only credential reference metadata is present |
-| PC-02 | Fetch provider configuration for PWA | No raw secret is returned |
-| PC-03 | Provider adapter raises an exception containing a secret | Logs and client error redact it |
-| PC-04 | Export character/platform data | Provider secrets are excluded |
+| PC-01 | Inspect provider connection records | Only credential reference metadata |
+| PC-02 | Fetch provider configuration for PWA | No raw secret returned |
+| PC-03 | Provider exception contains secret | Logs and client error redact it |
+| PC-04 | Export platform data | Provider secrets excluded |
+| PC-05 | Host secure store unavailable | Remote credential integration disabled |
+| PC-06 | Credential reference cannot be resolved | Safe error; no fallback to plaintext storage |
+| PC-07 | Local inference needs no credential | Works without provider secret |
 
-The exact secure credential-storage mechanism is an open architecture decision and must be selected before live provider integration.
+## 12. 100%-free dependency and deployment gate
 
-## 12. Test execution strategy
+### 12.1 Required rule
 
-### 12.1 Test layers
+The core platform must not require paid software, subscription, API usage, hosting, database, storage, authentication, tunnel, monitoring, or automation.
 
-1. **Unit tests:** individual guards, eligibility predicates, policy resolution, and lifecycle rules.
-2. **Service integration tests:** service operations against a temporary SQLite database using the real schema.
-3. **API boundary tests:** request validation, selected-character context, denial behavior, and response redaction.
-4. **Regression tests:** every discovered defect becomes a permanent test.
+The project may use existing owned hardware, existing internet access, and built-in OS capabilities. Those do not make third-party services free if they later introduce charges.
 
-### 12.2 Suggested repository layout
+### 12.2 Test cases
+
+| ID | Scenario | Expected result |
+|---|---|---|
+| FR-01 | Inspect required runtime dependencies | No paid license or subscription required |
+| FR-02 | Inspect hosting/deployment plan | Runs on existing hardware; no paid hosting required |
+| FR-03 | Router receives unknown cost metadata | Candidate blocked |
+| FR-04 | Free-tier provider quota/terms are no longer verified | Remote candidate disabled until re-verified |
+| FR-05 | Provider requires card, prepaid credit, or paid subscription | Provider not eligible for baseline |
+| FR-06 | Candidate may incur automatic billing or overage | Candidate blocked |
+| FR-07 | No verified free model is available | Clear no-free-model state; no paid fallback |
+| FR-08 | Dependency update changes license or pricing | Re-evaluation required before adoption |
+| FR-09 | Core platform starts without remote provider credentials | Core functions remain available; AI generation may report no available free model |
+| FR-10 | Test suite is executed | No live paid network request or secret required |
+
+### 12.3 Meaning of 100% free
+
+The project constraint means no required new paid software, subscription, API, or hosting expense. Existing electricity, internet bandwidth, storage, and hardware use may still have real-world costs.
+
+## 13. Test execution strategy
+
+### 13.1 Test layers
+
+1. Unit tests: access guards, eligibility predicates, policy resolution, cost gates, and lifecycle rules.
+2. Service integration tests: services against temporary SQLite using the real schema.
+3. API boundary tests: request validation, selected-character context, denial behavior, and response redaction.
+4. Regression tests: every discovered defect becomes a permanent test.
+5. Dependency audit: review licenses, pricing, payment requirements, and hosting assumptions before approving a runtime/provider.
+
+### 13.2 Suggested repository layout
 
 ```text
 database/
@@ -306,6 +383,7 @@ tests/
     test_model_policy_resolver.py
     test_memory_lifecycle.py
     test_provider_credential_boundary.py
+    test_no_cost_policy.py
   integration/
     test_application_services.py
   api/
@@ -313,56 +391,75 @@ tests/
     test_error_redaction.py
 ```
 
-This is a proposed layout. It does not imply that a backend language, web framework, API style, or dependency-injection library has already been selected.
+This layout does not imply that a backend language, framework, API style, or dependency-injection library has been selected.
 
-### 12.3 Test data fixture
+### 13.3 Test fixtures
 
 Use at least:
 
-- Character A and Character B.
+- Character A and B.
 - One active persona version per character.
 - One conversation and multiple messages per character.
-- Own confirmed/approved memory for each character.
-- Candidate, pending, rejected, superseded, and deleted memory examples.
+- Own confirmed/approved memories for each character.
+- Candidate, pending, rejected, superseded, deleted, and expired memories.
 - One eligible shared memory and one revoked share.
 - One sensitive memory that must never be shared.
 - Two providers and multiple models with enabled/disabled states.
-- Global and per-character model policies.
+- Global and per-character policies.
 - Mock provider connection states: connected, disconnected, expired, and error.
+- Mock cost states: verified no-cost, paid, unknown, expired verification, and billable-overage risk.
+- Mock credential store: available, unavailable, and lookup failure.
 
-Do not use real private conversations or real provider credentials in fixtures.
+Do not use real private conversations, real provider credentials, or live billable services in fixtures.
 
-## 13. Release gate before backend implementation
+## 14. Release gate before backend implementation
 
 The application-layer design is ready to move toward implementation only when:
 
-- All test cases have a defined expected result.
-- Open policy decisions in Sections 7, 9, and 10 are resolved or explicitly deferred with safe defaults.
-- Every character-owned read and write is scoped through a validated character context.
-- Memory retrieval is tested against private, shared, revoked, sensitive, pending, superseded, and deleted records.
+- All test cases have defined expected results.
+- Character-owned reads and writes are scoped through validated character context.
+- Retrieval is tested against private, shared, revoked, sensitive, pending, superseded, deleted, and expired records.
 - Model policy precedence and fallback format are specified.
+- The no-cost router rejects unknown, paid, and billable candidates.
 - Lifecycle operations are transactional and have rollback tests.
-- Provider secrets are never exposed to the client or logs.
+- Provider secrets are never exposed to client or logs.
+- Secure credential storage is either tested or remote credential integrations remain disabled.
+- Required dependencies and hosting pass the 100%-free audit.
 - All application and integration tests pass on the target runtime.
 
-Passing tests demonstrates the tested behaviors; it is not a substitute for a broader security review before exposing the service to a network.
+Passing tests demonstrates tested behavior; it is not a substitute for broader security review before exposing the service to a network.
 
-## 14. Open decisions to resolve before implementation
+## 15. Decisions still open
 
-1. What is the trusted source of the currently selected character in the single-user deployment?
-2. What should an explicitly disabled character-specific model policy mean: block the task, or fall back to global?
-3. What exact JSON structure and identifier format should `fallback_models_json` use?
-4. Are cross-provider fallbacks allowed?
-5. What are the memory expiry defaults and exact expiry behavior?
-6. What source notes or derived summaries may remain after a user requests deletion?
-7. What secure credential-storage mechanism is available on the selected host/runtime?
+The seven baseline decisions are approved and are no longer open. These implementation choices remain undecided:
 
-## 15. Current status
+1. Backend language and framework.
+2. Backend runtime and final host device.
+3. Local inference runtime and model compatibility on POCO F6 / Mi 9 SE.
+4. Exact working-memory TTL.
+5. Memory ranking, category taxonomy, and retrieval budget.
+6. Secure credential-store implementation for any optional remote provider.
+7. Free authentication and remote-access design, if remote access is later required.
+8. Backup encryption, restore process, and retention period.
+9. Provider-specific free quotas and terms at the time of integration.
 
-**Completed:** database schema acceptance suite (`database/tests/test_acceptance.py`) has been added and checked against the initial SQLite schema.
+Every choice must pass the 100%-free constraint before adoption.
 
-**Current milestone:** application security and behavior test specification.
+## 16. Current status
 
-**Not yet completed:** application service implementation, application-layer test suite, API tests, provider integration, and production security review.
+**Completed:**
+- SQLite schema acceptance suite is present at `database/tests/test_acceptance.py`.
+- Seven application architecture recommendations are approved.
+- 100%-free project constraint is approved.
+- Application-layer test specification has been updated to reflect these decisions.
 
-**Next action:** review and approve the open decisions in Section 14, then select the backend runtime and implement the testable service boundaries before adding provider integrations.
+**Not yet completed:**
+- Backend runtime selection.
+- Local inference compatibility testing.
+- Application service implementation.
+- Application-layer test suite.
+- API tests.
+- Provider integration.
+- Production security review.
+
+**Next action:** evaluate backend runtime and local inference options against existing hardware and the 100%-free constraint. Do not start backend implementation until the target runtime is selected and its compatibility/cost audit is complete.
