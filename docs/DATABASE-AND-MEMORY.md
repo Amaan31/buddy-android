@@ -1,570 +1,506 @@
-
 # DATABASE & MEMORY ARCHITECTURE
 
-**Project:** Multi-Character AI Companion Platform
-**Status:** Initial Design Proposal
-**Parent Document:** docs/PLATFORM-FOUNDATION.md
+**Project:** Multi-Character AI Companion Platform\
+**Status:** Initial Design Proposal\
+**Parent Document:** `docs/PLATFORM-FOUNDATION.md`\
 **Database Candidate:** SQLite
 
 ## 1. Purpose
 
-This document defines the initial database and memory architecture for a platform hosting multiple independent AI characters.
-
-The database is shared infrastructure, but character-specific records must remain logically isolated.
-
-Every conversation, message, memory, persona version, and relationship record must be associated with its owning character.
+This document defines the initial database and memory architecture for a
+platform hosting multiple independent AI characters. The database is
+shared infrastructure, but character-specific records must remain
+logically isolated. Every conversation, message, memory, persona
+version, working-memory record, and relationship record must be
+associated with its owning character.
 
 ## 2. Design Principles
 
-- Every character has a stable unique character_id.
-- Character-specific data must be scoped to its character.
-- Conversation history and long-term memory are different data types.
-- Memory extraction must be reviewable, editable, and reversible.
-- Candidate memories are not automatically confirmed facts.
-- Memories should retain source references where possible.
-- Characters must not access another character's private data.
-- Deletion and correction must have predictable effects.
-- The schema must support migrations and encrypted backups.
-- The initial implementation must remain suitable for SQLite.
+-   Every character has a stable unique `character_id`.
+-   Character-specific data must be scoped to its character.
+-   Conversation history and long-term memory are different data types.
+-   Memory extraction must be reviewable, editable, and reversible.
+-   Candidate memories are not automatically confirmed facts.
+-   Memories should retain source references where possible.
+-   Characters must not access another character's private data by
+    default.
+-   Memory sharing is selective and requires explicit user
+    authorization.
+-   Deletion and correction must have predictable effects.
+-   The schema must support migrations and encrypted backups.
+-   The initial implementation must remain suitable for SQLite.
+-   Provider credentials must not be stored as raw secrets in ordinary
+    database fields.
 
 ## 3. Three Memory Layers
 
 ### 3.1 Conversation History
 
-Stores original conversation records.
-
-Purpose:
-- Reconstruct conversations.
-- Provide recent context.
-- Support user review, export, and deletion.
-- Provide source material for memory extraction.
-
-Conversation history is not itself curated long-term memory.
+Stores original conversation records to reconstruct conversations,
+provide recent context, support user review/export/deletion, and provide
+source material for memory extraction. Conversation history is not
+itself curated long-term memory.
 
 ### 3.2 Working Memory
 
-Stores temporary context needed for active conversations.
-
-Examples:
-- Rolling conversation summaries.
-- Current topics.
-- Unresolved questions.
-- Temporary context relevant to the next response.
-
-Working memory may be regenerated or discarded when no longer useful.
-
-It must not silently become long-term memory.
+Stores temporary context needed for active conversations, such as
+rolling summaries, current topics, unresolved questions, and temporary
+context relevant to the next response. Working memory may be regenerated
+or discarded when no longer useful. It must not silently become
+long-term memory.
 
 ### 3.3 Long-Term Memory
 
-Stores selected information intended to remain useful across conversations.
+Stores selected information intended to remain useful across
+conversations, such as user preferences, important events, ongoing
+plans, confirmed facts, character-specific relationship observations,
+and important corrections.
 
-Possible categories:
-- User preferences.
-- Important events and experiences.
-- Ongoing plans and commitments.
-- Confirmed facts.
-- Character-specific relationship observations.
-- Important corrections.
-
-Each memory item should have:
-- Unique memory ID.
-- Owning character ID.
-- Category and content.
-- Status.
-- Certainty indicator, where appropriate.
-- Source references.
-- Created and updated timestamps.
-- Optional review or expiry metadata.
-
-The system must distinguish explicit statements from model inferences.
+Each memory item should have a unique memory ID, owning character ID,
+category/content, lifecycle status, approval status, source type,
+sensitivity classification, optional certainty, source references,
+timestamps, and optional review/expiry metadata. The system must
+distinguish explicit statements from model inferences.
 
 ## 4. Logical Data Model
 
-### 4.1 characters
+### 4.1 `characters`
 
-Stores the character registry.
+Character registry: `character_id` (primary key), unique `slug`,
+`display_name`, `description`, `status` (`active`, `archived`,
+`deleted`), `created_at`, and `updated_at`.
 
-Fields:
-- character_id — primary key.
-- display_name.
-- status — active, archived, or deleted.
-- created_at.
-- updated_at.
+### 4.2 `persona_versions`
 
-### 4.2 persona_versions
+Versioned character configuration: `persona_version_id` (primary key),
+`character_id`, `version_number`, `configuration_json`,
+`change_summary`, `is_active`, and `created_at`. Only one persona
+version may be active per character. Conversations record the persona
+version active when they began.
 
-Stores versioned character configuration.
+### 4.3 `conversations`
 
-Fields:
-- persona_version_id — primary key.
-- character_id — owning character.
-- version_number.
-- configuration — structured persona data.
-- change_summary.
-- created_at.
+Conversation threads: `conversation_id` (primary key), `character_id`,
+`title`, `status` (`active`, `archived`, `deleted`),
+`persona_version_id`, `started_at`, `last_message_at`, and
+`archived_at`. The selected persona version must belong to the same
+character.
 
-Conversations should record which persona version was active when they began.
+### 4.4 `messages`
 
-### 4.3 conversations
+Individual messages: `message_id` (primary key), `conversation_id`,
+`character_id`, `sequence_number`, `role` (`user`, `assistant`,
+`system`), `content`, optional `provider_id` and `model_id`,
+`message_status` (`complete`, `failed`, `partial`), and `created_at`. A
+composite foreign key ensures that a message's character matches its
+conversation's character.
 
-Stores conversation threads.
+### 4.5 `working_memory`
 
-Fields:
-- conversation_id — primary key.
-- character_id — owning character.
-- title.
-- status — active, archived, or deleted.
-- started_at.
-- last_message_at.
-- persona_version_id.
+Temporary summaries and active context: `working_memory_id` (primary
+key), `character_id`, `conversation_id`, `summary`, `context_json`,
+`updated_at`, and `expires_at`. The initial schema permits one
+working-memory record per conversation. Working memory should be bounded
+and replaceable.
 
-### 4.4 messages
+### 4.6 `memory_items`
 
-Stores individual messages.
+Candidate and retained long-term memories: `memory_id` (primary key),
+`character_id`, `category`, `content`, `status` (`candidate`,
+`confirmed`, `superseded`, `rejected`, `deleted`), `approval_status`
+(`pending`, `auto_approved`, `user_approved`, `rejected`), `source_type`
+(`explicit`, `inferred`, `user_approved`), `sensitivity` (`normal`,
+`sensitive`), optional `certainty` between 0 and 1, optional
+`supersedes_memory_id`, `review_note`, timestamps, `reviewed_at`, and
+`expires_at`.
 
-Fields:
-- message_id — primary key.
-- conversation_id — owning conversation.
-- character_id — owning character.
-- role — user, assistant, or system.
-- content.
-- created_at.
-- provider_id, where applicable.
-- model_id, where applicable.
-- message_status — complete, failed, or partial.
+A memory must have an approved status before it can become confirmed.
+Automatic approval is restricted to explicit, normal-sensitivity
+memories with a confidence score of at least 0.90. Inferred or sensitive
+memories require user review. Corrections supersede older memories
+without continuing to present them as current truth.
 
-The application must validate that the message's character matches its conversation's character.
+### 4.7 `memory_sources`
 
-### 4.5 working_memory
+Links memory items to source material: `memory_source_id` (primary key),
+`memory_id`, `character_id`, optional `message_id`, `source_note`, and
+`created_at`. The message reference uses a restrictive delete rule.
+Before deleting a source message, the application must first detach the
+reference by setting `message_id` to `NULL`, while preserving the source
+record where appropriate. Source references must never allow
+cross-character conversation access.
 
-Stores temporary summaries and active context.
+### 4.8 `memory_shares`
 
-Fields:
-- working_memory_id — primary key.
-- character_id.
-- conversation_id.
-- summary.
-- context_payload.
-- updated_at.
-- expires_at.
+Explicit sharing permissions: `memory_share_id` (primary key),
+`memory_id`, `source_character_id`, `target_character_id`, `status`
+(`active`, `revoked`), `granted_at`, and `revoked_at`. Only confirmed,
+approved, normal-sensitivity memories may be shared. Sharing a memory
+does not grant access to its original conversation or other memories.
+Re-activating a revoked permission must revalidate eligibility.
 
-Working memory should be bounded in size and replaceable.
+### 4.9 `relationship_states`
 
-### 4.6 memory_items
+Character-specific relationship observations: `relationship_state_id`
+(primary key), `character_id`, `state_version`, `state_json`,
+`evidence_summary`, and `created_at`. Relationship state must be
+grounded in interactions and remain separate for every character.
 
-Stores candidate and retained long-term memories.
+### 4.10 `platform_settings`
 
-Fields:
-- memory_id — primary key.
-- character_id.
-- category.
-- content.
-- status — candidate, confirmed, superseded, or deleted.
-- certainty — optional confidence indicator.
-- source_type — explicit statement, conversation-derived, or user-approved.
-- created_at.
-- updated_at.
-- reviewed_at.
-- expires_at.
-- supersedes_memory_id — optional self-reference.
+Global settings not owned by an individual character: `setting_key`
+(primary key), JSON `setting_value`, and `updated_at`. Examples include
+global context limits, backup preferences, and interface preferences.
+Character-specific settings remain separate.
 
-A correction should preserve the fact that an older memory was superseded without continuing to present it as current truth.
+### 4.11 `ai_providers`
 
-### 4.7 memory_sources
+Supported provider definitions: `provider_id` (primary key),
+`display_name`, and `status` (`active`, `disabled`).
 
-Links memory items to their source material.
+### 4.12 `ai_models`
 
-Fields:
-- memory_source_id — primary key.
-- memory_id.
-- message_id, where available.
-- source_note.
-- created_at.
+Available models associated with providers: `model_id` (primary key),
+`provider_id`, `display_name`, `capabilities_json`, and `status`
+(`active`, `disabled`). A model belongs to one provider.
 
-This allows memory traceability.
+### 4.13 `provider_connections`
 
-### 4.8 relationship_states
+Provider connection metadata: `connection_id` (primary key),
+`provider_id`, `auth_method`, `status` (`connected`, `disconnected`,
+`expired`, `error`), `credential_ref`, `last_checked_at`, and
+`created_at`. `credential_ref` points to secure credential storage. Raw
+API keys and OAuth tokens must never be stored directly in this table.
 
-Stores character-specific relationship observations.
+### 4.14 `model_policies`
 
-Fields:
-- relationship_state_id — primary key.
-- character_id.
-- state_version.
-- state_data.
-- evidence_summary.
-- created_at.
-
-Relationship state must be grounded in interactions and remain separate for every character.
-
-### 4.9 platform_settings
-
-Stores global settings that are not owned by an individual character.
-
-Examples:
-- Default provider preference.
-- Global context limits.
-- Backup preferences.
-- Interface preferences.
-
-Character-specific settings must remain separate.
+Global and character-specific model selection policies: `policy_id`
+(primary key), nullable `character_id` (`NULL` means global policy),
+`task_type`, `preferred_provider_id`, `preferred_model_id`,
+`fallback_models_json`, `is_enabled`, `created_at`, and `updated_at`.
+The Model Router uses these policies to select an appropriate provider
+and model for each task. Character-specific policies may override global
+defaults. The preferred model must belong to the preferred provider.
 
 ## 5. Character Isolation
 
-Every character-specific record must be associated with a unique character_id.
+Every character-specific record must be associated with a unique
+`character_id`.
 
-Required relationships:
+Required relationships: - One character has many persona versions. - One
+character has many conversations. - One conversation has many
+messages. - One conversation has at most one working-memory record in
+the initial schema. - One character has many long-term memory items. -
+One memory item may have multiple source references. - One memory item
+may have multiple sharing permissions. - One character has many
+relationship-state versions. - Model policies may be global or
+character-specific.
 
-- One character has many persona versions.
-- One character has many conversations.
-- One conversation has many messages.
-- One character has many working-memory records.
-- One character has many long-term memory items.
-- One memory item may have multiple source references.
-- One character has many relationship-state versions.
-
-The backend must validate the selected character before retrieving conversations or memories.
-
-One character must never automatically retrieve another character's private data.
-
-Where practical, use foreign keys and composite constraints to enforce ownership.
+The backend must validate the selected character before retrieving
+conversations or memories. One character must never automatically
+retrieve another character's private data. Use foreign keys and
+composite constraints where practical.
 
 ## 6. Memory Lifecycle
 
-Proposed lifecycle:
+1.  Capture: store the original message.
+2.  Detect: identify potentially useful information.
+3.  Create candidate: create a candidate memory with source references.
+4.  Review: check relevance, duplication, contradiction, sensitivity,
+    and certainty.
+5.  Retain: confirm according to the configured approval policy.
+6.  Retrieve: select relevant memories for future conversations.
+7.  Update: correct or supersede outdated memories.
+8.  Forget: process deletion requests and derived data.
 
-1. Capture: store the original message.
-2. Detect: identify potentially useful information.
-3. Create candidate: create a candidate memory with source references.
-4. Review: check relevance, duplication, contradiction, sensitivity, and certainty.
-5. Retain: confirm according to the configured approval policy.
-6. Retrieve: select relevant memories for future conversations.
-7. Update: correct or supersede outdated memories.
-8. Forget: process deletion requests and derived data.
-
-The first implementation should favor conservative memory creation.
+The first implementation should favor conservative memory creation. A
+memory is eligible for retrieval only when its lifecycle status is
+`confirmed` and approval status is `auto_approved` or `user_approved`.
 
 ## 7. Memory Retrieval
 
-The Memory Engine retrieves only a small relevant subset of memories.
+The Memory Engine retrieves only a small relevant subset. Initial
+signals include correct character ID, relevance, category, recency,
+confirmation/approval status, sensitivity/sharing eligibility, expiry,
+and supersession.
 
-Initial retrieval signals:
-- Correct character ID.
-- Relevance to current topic.
-- Memory category.
-- Recency, where useful.
-- Confirmation status.
-- Expiry and supersession status.
+A character may retrieve: 1. Its own confirmed and approved memories. 2.
+Individual normal-sensitivity memories explicitly shared with it by
+another character.
 
-Do not retrieve:
-- Memories belonging to another character.
-- Deleted or superseded memories as current facts.
-- Low-certainty inferences as confirmed facts.
-- Unrelated personal details.
+Do not retrieve another character's memories unless explicitly shared;
+deleted, rejected, superseded, or pending memories as current facts;
+low-certainty inferences as confirmed facts; sensitive memories shared
+from another character; or unrelated personal details.
 
-Initial retrieval can use SQLite queries and simple ranking.
+Memory sharing does not grant access to source conversations. Initial
+retrieval can use SQLite queries and simple ranking. Vector databases
+and embeddings are optional future enhancements.
 
-Vector databases and embeddings are optional future enhancements.
+The `v_accessible_memories` view provides eligible records, but the
+backend must filter by the requested `accessible_to_character_id`. The
+application must not expose unrestricted database access to clients.
 
 ## 8. Deletion, Correction, and Privacy
 
-The platform must support:
-- Editing a memory.
-- Marking a memory as incorrect.
-- Superseding outdated memories.
-- Deleting memories.
-- Deleting conversations.
-- Archiving characters.
-- Exporting character data.
+The platform must support editing memories, marking memories incorrect,
+superseding outdated memories, deleting memories and conversations,
+archiving characters, exporting character data, and revoking sharing
+permissions.
 
-Deletion must consider derived data, including working-memory summaries and source references.
+Deletion must consider derived data, including working-memory summaries
+and source references. Before deleting a message referenced by
+`memory_sources`, the application must detach the source reference in a
+transaction. The source record and useful source note may remain,
+subject to the user's deletion request and retention policy.
 
-The product must explain what is deleted and what may remain in backups until their retention period ends.
+The initial schema uses restrictive foreign-key rules for certain
+provenance relationships. The application must implement the
+corresponding deletion workflow rather than relying on blind cascades.
+Character records should normally be archived or soft-deleted. Physical
+deletion requires an explicit, tested erasure workflow.
+
+The product must explain what is deleted and what may remain in backups
+until their retention period ends.
 
 ## 9. SQLite Implementation Notes
 
-Initial requirements:
-- Enable foreign-key enforcement on every connection.
-- Use parameterized queries.
-- Use transactions for multi-record operations.
-- Add indexes for character_id, conversation_id, created_at, and memory status as needed.
-- Use schema migrations.
-- Store timestamps consistently in UTC.
-- Keep large media files outside SQLite.
-- Encrypt backups.
-- Test against the SQLite version available in the selected runtime.
+-   Enable foreign-key enforcement on every connection.
+-   Use parameterized queries.
+-   Use transactions for multi-record operations.
+-   Add indexes for character IDs, conversation IDs, timestamps, and
+    memory status as needed.
+-   Use versioned schema migrations.
+-   Store timestamps consistently in UTC.
+-   Keep large media files outside SQLite.
+-   Encrypt backups.
+-   Test against the SQLite version available in the selected runtime.
+-   Confirm JSON function support in the target SQLite build.
+-   Never expose provider credentials to the frontend.
+
+`database/schema/001_initial.sql` is an initial schema for a new
+database, not an upgrade migration for an existing database.
 
 ## 10. Initial Build Order
 
-1. Create character registry.
-2. Create persona version records.
-3. Create conversations and messages.
-4. Enforce character ownership.
-5. Add working memory.
-6. Add candidate and confirmed long-term memories.
-7. Add memory source references.
-8. Add correction and deletion workflows.
-9. Add relationship-state versioning.
-10. Test isolation with at least two characters.
+1.  Create character registry.
+2.  Create persona version records.
+3.  Create conversations and messages.
+4.  Enforce character ownership.
+5.  Add provider, model, and model-policy records.
+6.  Add working memory.
+7.  Add candidate and confirmed long-term memories.
+8.  Add memory source references.
+9.  Add selective memory sharing and revocation.
+10. Add correction and deletion workflows.
+11. Add relationship-state versioning.
+12. Test isolation with at least two characters.
 
 ## 11. Acceptance Criteria
 
-The foundation is ready when:
-
-- Two or more characters can be created.
-- Each character has independent conversations.
-- Messages cannot be attached to another character's conversation.
-- Memory retrieval never crosses character boundaries.
-- Candidate and confirmed memories are distinguishable.
-- Memories can be traced to sources where available.
-- Corrections can supersede outdated memories.
-- Deletion behavior is documented and tested.
-- Database backups can be restored.
+The foundation is ready for backend implementation when: - Two or more
+characters can be created. - Each character has independent persona
+versions and conversations. - Messages cannot be attached to another
+character's conversation. - Memory retrieval never crosses character
+boundaries without an explicit share. - Candidate and confirmed memories
+are distinguishable. - Automatic approval rejects inferred, sensitive,
+or low-confidence memories. - User-approved memories can be retained. -
+Memories can be traced to sources where available. - Sharing is limited
+to confirmed, approved, normal-sensitivity memories. - Revoked sharing
+permissions no longer provide access. - Re-activating a share
+revalidates eligibility. - Corrections can supersede outdated
+memories. - Message deletion handles source references safely. -
+Provider credentials are not stored as raw secrets. - Database backups
+can be restored. - Global and character-specific model policies can
+coexist.
 
 ## 12. Open Decisions
 
-Still to be decided:
-- Whether memory candidates require user approval, automatic approval under strict rules, or a hybrid policy.
-- Exact memory categories.
-- Certainty representation.
-- Retention periods.
-- Whether embeddings are necessary.
-- Final schema and migration tooling.
-- Whether multi-user support is required in the first release.
+The following remain open for future design and implementation: - Exact
+memory category taxonomy. - Memory retention and expiry policies. -
+Embedding and vector-search requirements. - Final migration tooling. -
+Secure credential-storage implementation. - Backup encryption and
+restoration strategy. - Runtime compatibility and deployment
+validation. - Future multi-user migration requirements.
 
-## 13. Current Status
+Approved decisions: - Hybrid memory approval. - Selective memory
+sharing. - Single-user initial architecture. - SQLite as the initial
+database candidate.
 
-Stage: Database and Memory Architecture Design.
+## 13. Architecture Decisions
 
-Next milestone: Review this conceptual model, then create the first SQLite schema and migration.
+### 13.1 Memory Approval: Hybrid
 
-No production database has been created yet.
+The AI may automatically identify potential memory items. Only explicit,
+non-sensitive, high-confidence information may be automatically
+approved. Ambiguous, inferred, sensitive, or uncertain information
+remains pending until reviewed by the user. The user can inspect,
+correct, approve, reject, or delete memory items. Automatic approval
+follows Section 14.
 
-## 14. Architecture Decisions
+### 13.2 Memory Sharing: Selective
 
-The following decisions are approved for the initial version of the platform.
+Each character has its own isolated memory space. Characters cannot
+access another character's memories by default. The user may explicitly
+share individual confirmed memory items with selected other characters.
+Sharing one memory does not grant access to the original conversation or
+other memories. Sharing can be revoked. Sensitive memories cannot be
+shared in the initial version.
 
-14.1 Memory Approval: Hybrid
+### 13.3 Platform Ownership: Single-User
 
-The platform uses a hybrid memory approval system.
+The initial version is designed for one user. No multi-user account
+system is required. Character data belongs to the platform owner, while
+character-level data isolation remains mandatory. The architecture
+should remain extendable to future multi-user support without building
+that system now.
 
-- The AI may automatically identify potential memory items from conversations.
-- Only explicit, non-sensitive, and high-confidence information may be automatically approved.
-- Ambiguous, inferred, sensitive, or uncertain information must remain pending until reviewed by the user.
-- The user can inspect, correct, approve, reject, or delete memory items.
-- Automatic approval must follow the restrictions defined in Section 15.
+## 14. Hybrid Memory Approval Policy
 
-14.2 Memory Sharing: Selective
+### 14.1 Candidate Identification
 
-Each character has its own isolated memory space.
+The AI may identify potential memories from conversation messages and
+create candidates. Each candidate should contain its content, owning
+character ID, source reference where available, source type, confidence
+score, sensitivity classification, approval status, and creation
+timestamp. Identifying a candidate does not mean it is approved for
+long-term storage.
 
-- Characters cannot access another character's memories by default.
-- The user may explicitly share individual confirmed memory items with selected characters.
-- Sharing one memory does not grant access to the original conversation or other memories.
-- The user can revoke memory-sharing permissions at any time.
-- Sensitive memories cannot be shared in the initial version.
+### 14.2 Automatic Approval Conditions
 
-14.3 Platform Ownership: Single-User
+Automatic approval is allowed only when all conditions are met: 1. The
+information was explicitly stated by the user. 2. It is classified as
+non-sensitive. 3. Its confidence score is at least 0.90. 4. It is not
+ambiguous or dependent on unsupported assumptions.
 
-The initial version is designed for one user.
+Automatic approval must not be used for inferred personal information,
+sensitive information, or uncertain interpretations.
 
-- No multi-user account system is required for the initial implementation.
-- Character data belongs to the platform owner.
-- The database must retain character-level data isolation.
-- The architecture should remain extendable to support multiple users in a future version without requiring a complete redesign.
+### 14.3 User Review Required
 
----
+The following remain pending until user review: inferred information,
+ambiguous statements, sensitive personal information,
+insufficient-confidence information, and information that could
+materially affect a character's understanding of the user but is not
+explicitly confirmed.
 
-## 15. Hybrid Memory Approval Policy
+The user must be able to approve, edit before approval, reject, delete,
+and correct memories.
 
-15.1 Memory Candidate Identification
+### 14.4 Memory Status Lifecycle
 
-The AI may identify potential memories from conversation messages and create memory candidates.
+  Status         Description
+  -------------- -----------------------------------------------
+  `candidate`    Identified but not yet confirmed
+  `confirmed`    Approved for long-term use
+  `superseded`   Replaced by a newer or corrected memory
+  `rejected`     Explicitly rejected by the user
+  `deleted`      Marked as deleted and excluded from retrieval
 
-Each candidate should contain:
+Approval status is separate from lifecycle status: - `pending` -
+`auto_approved` - `user_approved` - `rejected`
 
-- The memory content.
-- The owning character ID.
-- Its source message or conversation reference, when available.
-- Its source type.
-- Its confidence score.
-- Its sensitivity classification.
-- Its approval status.
-- Its creation timestamp.
+A memory is retrievable as an active long-term memory only when
+lifecycle status is `confirmed` and approval status is `auto_approved`
+or `user_approved`.
 
-Identifying a candidate does not automatically mean that the information is approved for long-term storage.
+## 15. Selective Memory Sharing
 
-15.2 Automatic Approval Conditions
+### 15.1 Default Isolation
 
-A memory candidate may be automatically approved only when all of the following conditions are met:
+Every memory item belongs to exactly one character through
+`character_id`. A character may retrieve its own confirmed and approved
+memories and individual normal-sensitivity memories explicitly shared
+with it. Sharing never grants access to the source character's
+conversation history.
 
-1. The information was explicitly stated by the user.
-2. The information is classified as non-sensitive.
-3. The confidence score is at least 0.90.
-4. The information is not ambiguous or dependent on unsupported assumptions.
+### 15.2 Sharing Requirements
 
-Automatic approval must not be used for inferred personal information, sensitive information, or uncertain interpretations.
+A memory may be shared only when: - Its lifecycle status is
+`confirmed`. - Its sensitivity is `normal`. - Its approval status is
+`auto_approved` or `user_approved`. - Source and target characters are
+different. - The user explicitly authorizes sharing.
 
-15.3 User Review Required
+Sensitive memories cannot be shared in the initial version.
 
-The following candidates must remain pending until the user reviews them:
+### 15.3 Sharing Records
 
-- Inferred information.
-- Ambiguous statements.
-- Sensitive personal information.
-- Information with insufficient confidence.
-- Information that could materially affect a character's understanding of the user but is not explicitly confirmed.
+`memory_shares` records the original memory, source character, target
+character, status, grant timestamp, and optional revocation timestamp.
+Permission status is `active` or `revoked`. A revoked permission no
+longer provides access. Re-activating it must revalidate memory
+eligibility.
 
-The user must be able to:
+### 15.4 Revocation
 
-- Approve a candidate.
-- Edit a candidate before approval.
-- Reject a candidate.
-- Delete an existing memory.
-- Correct an inaccurate memory.
+After revocation, the target character cannot retrieve the shared
+memory. The original memory remains owned by its source character; the
+source conversation remains inaccessible to the target; and other
+sharing permissions are unaffected. Revoking access does not delete the
+original memory.
 
-15.4 Memory Status Lifecycle
+### 15.5 Enforcement
 
-Memory items use the following lifecycle statuses:
+Memory retrieval must enforce ownership and sharing permissions at the
+database or service layer. It must not rely solely on AI instructions.
 
-Status| Description
-candidate| Identified but not yet confirmed
-confirmed| Approved for long-term use
-superseded| Replaced by a newer or corrected memory
-rejected| Explicitly rejected by the user
-deleted| Marked as deleted and excluded from retrieval
+## 16. Single-User Architecture
 
-Approval status and memory lifecycle status are separate concepts.
+### 16.1 Initial Scope
 
-Approval status records how a memory was approved:
+The initial platform supports one owner. It does not require user
+registration, multi-user account management, roles, permissions, or a
+separate user table. Characters represent AI personas, not platform
+users.
 
-- "pending"
-- "auto_approved"
-- "user_approved"
-- "rejected"
-
-A memory must not be retrieved as an active long-term memory unless its lifecycle status is "confirmed".
-
----
-
-## 16. Selective Memory Sharing
-
-16.1 Default Isolation
-
-Every memory item belongs to exactly one character through its "character_id".
-
-A character may retrieve:
-
-1. Its own confirmed memories.
-2. Individual memories explicitly shared with it by another character.
-
-A character must never gain access to another character's conversation history simply because a memory was shared.
-
-16.2 Sharing Requirements
-
-A memory may be shared only when:
-
-- Its lifecycle status is "confirmed".
-- Its sensitivity classification is "normal".
-- Its approval status is "auto_approved" or "user_approved".
-- The source and target characters are different.
-- The user explicitly authorizes the sharing action.
-
-Sensitive memories must not be shared in the initial version.
-
-16.3 Sharing Records
-
-The "memory_shares" table records individual sharing permissions.
-
-Each record must identify:
-
-- The original memory.
-- The source character.
-- The target character.
-- The sharing status.
-- The creation timestamp.
-- The revocation timestamp, when applicable.
-
-A sharing permission can have the following statuses:
-
-- "active"
-- "revoked"
-
-A revoked permission must no longer provide access to the memory.
-
-16.4 Sharing Revocation
-
-The user may revoke a sharing permission at any time.
-
-After revocation:
-
-- The target character must no longer retrieve the shared memory.
-- The original memory remains owned by its source character.
-- The original conversation remains inaccessible to the target character.
-- Other sharing permissions are not affected.
-
-Revoking access must not delete the original memory.
-
-16.5 Memory Retrieval Rules
-
-Memory retrieval must enforce character ownership and sharing permissions at the database or service layer.
-
-The retrieval process must not rely solely on AI instructions to enforce isolation.
-
----
-
-## 17. Single-User Architecture
-
-17.1 Initial Scope
-
-The initial platform supports one owner.
-
-The first version does not require:
-
-- User registration.
-- Multi-user account management.
-- User roles and permissions.
-- A separate user table.
-
-Character identity and ownership remain separate concepts. Characters represent AI personas, not platform users.
-
-17.2 Data Ownership
+### 16.2 Data Ownership
 
 All platform data belongs to the single platform owner.
+Character-specific data remains associated with its owning character.
+Shared infrastructure such as provider definitions, model catalogue, and
+global settings may be managed centrally.
 
-Character-specific data must remain associated with its owning character.
+### 16.3 Future Compatibility
 
-Shared infrastructure data, such as AI provider configurations and global platform settings, may be managed centrally.
+Future multi-user support may introduce a `users` table, owner
+references for characters, user-level access control, and user-scoped
+provider connections/settings. These components must not be implemented
+until multi-user support becomes an explicit requirement.
 
-17.3 Future Compatibility
+## 17. Implementation Constraints
 
-Although multi-user support is not part of the initial implementation, the database design should avoid assumptions that would make future migration unnecessarily difficult.
+1.  SQLite is the initial database engine.
+2.  Every character-owned record must preserve character-level
+    ownership.
+3.  Memory retrieval must enforce ownership and sharing permissions.
+4.  Raw API keys and provider credentials must never be stored directly
+    in ordinary database fields.
+5.  Provider credentials must be referenced through secure credential
+    storage.
+6.  Memory sources should preserve provenance whenever possible.
+7.  Deletion and correction operations must maintain memory consistency.
+8.  Database migrations must be versioned.
+9.  The application must support database backup and restoration.
+10. Memory sharing and automatic approval must be enforced by
+    application logic and database constraints where practical.
+11. The initial implementation must be tested with at least two
+    characters.
 
-Future multi-user support may introduce:
+## 18. Current Status
 
-- A "users" table.
-- An owner or user reference for characters.
-- User-level access control.
-- User-scoped provider connections and settings.
+**Stage:** Database and Memory Architecture Design.
 
-These components must not be implemented until multi-user support becomes an explicit project requirement.
+**Completed:** - Logical database model. - Character-level data
+isolation design. - Hybrid memory approval policy. - Selective memory
+sharing policy. - Single-user architecture decision. - Initial SQLite
+schema draft.
 
----
+**Pending:** - Final SQL schema review. - SQLite execution and integrity
+testing. - Two-character memory isolation testing. - Memory sharing and
+revocation testing. - Memory deletion and correction testing. - Backup
+and restoration testing.
 
-## 18. Implementation Constraints
+**Next milestone:** Validate the initial SQLite schema before
+implementing the backend.
 
-The initial database implementation must follow these constraints:
-
-1. SQLite is the initial database engine.
-2. Every character-owned record must preserve character-level ownership.
-3. Memory retrieval must enforce ownership and sharing permissions.
-4. Raw API keys and provider credentials must never be stored directly in ordinary database fields.
-5. Provider credentials must be referenced through a secure credential-storage mechanism.
-6. Memory sources should preserve provenance whenever possible.
-7. Deletion and correction operations must maintain memory consistency.
-8. Database migrations must be versioned.
-9. The application must support database backup and restoration.
-10. Memory sharing and automatic approval must be enforced by application logic and database constraints where practical.
-
-The initial implementation must be tested with at least two characters to verify that memory isolation and selective sharing work as intended.
+No production database has been created yet.
