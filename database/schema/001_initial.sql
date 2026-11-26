@@ -256,12 +256,12 @@ CREATE TABLE working_memory (
 
     UNIQUE (conversation_id),
 
-    FOREIGN KEY (conversation_id, character_id)
-        REFERENCES conversations(
-            conversation_id,
-            character_id
-        )
-        ON DELETE CASCADE
+    FOREIGN KEY (message_id, character_id)
+    REFERENCES messages(
+        message_id,
+        character_id
+    )
+    ON DELETE RESTRICT
 );
 
 -- ------------------------------------------------------------
